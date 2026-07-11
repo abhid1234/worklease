@@ -18,6 +18,26 @@ worklease conformance registry.jsonl merges.json               # did the fleet a
 
 Same open-format-and-conformance playbook as [opentrajectory](https://github.com/abhid1234/opentrajectory) and [constraintguard](https://github.com/abhid1234/constraintguard) — the coordination standard for the one thing a fleet can't currently share: *what it's about to touch.*
 
+### `worklease check <globs...>`
+
+Asks whether your planned edit overlaps any **active** claim held by **another**
+agent — the safe pre-edit question. Overlap is decided purely from the glob
+strings (conservative *satisfiability*: any concrete path could match both), with
+no filesystem access, so it is correct even for files that don't exist yet.
+
+```bash
+worklease check "src/auth/**"                 # human summary; exit 1 on conflict
+worklease check "src/**/*.ts" --json          # { clear, conflicts: [...] } for harnesses
+worklease check "src/auth/**" --agent me      # my own claims count as clear
+```
+
+- `--agent <id>` (or `WORKLEASE_AGENT`) — treat your own claims as clear.
+- `--registry <path>` (or `WORKLEASE_REGISTRY`) — registry file location
+  (default `.worklease/registry.jsonl`).
+- `--json` — emit `{ clear, conflicts }` verbatim.
+- Exit `0` when clear, `1` when any conflict — an advisory signal a pre-edit hook
+  can gate on, not a hard lock.
+
 Dogfood target: the author's own parallel-agent software factory + Conductor sessions.
 
 Status: **drafting** — see [`roadmap.md`](roadmap.md). MIT · zero dependencies · harness-neutral.
