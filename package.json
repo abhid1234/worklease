@@ -1,0 +1,13 @@
+{
+  "name": "@avee1234/worklease",
+  "version": "0.0.0",
+  "description": "The open coordination format for fleets of AI coding agents. Agents declare intent to edit file globs before they start, so parallel agents don't duplicate work or collide on hotspot files. Zero dependencies, harness-neutral, git-backed.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": { "worklease": "bin/worklease.js" },
+  "files": ["bin", "src", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test" },
+  "keywords": ["ai","agent","multi-agent","coordination","parallel","coding-agents","git-worktree","file-lease","fleet","claude-code","codex","cursor","conflict-prevention","zero-dependency"],
+  "license": "MIT"
+}
