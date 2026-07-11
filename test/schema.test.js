@@ -122,6 +122,18 @@ test("created/expires must be ISO 8601 UTC", () => {
       "INVALID_ISO8601"
     )
   );
+  // Impossible dates that Date.parse rolls over instead of rejecting (Feb 30,
+  // Apr 31) must still be caught by the round-trip check.
+  assert.ok(
+    codeAt(validateClaim(validClaim({ created: "2026-02-30T00:00:00Z" })), "created").includes(
+      "INVALID_ISO8601"
+    )
+  );
+  assert.ok(
+    codeAt(validateClaim(validClaim({ expires: "2026-04-31T00:00:00Z" })), "expires").includes(
+      "INVALID_ISO8601"
+    )
+  );
 });
 
 test("expires must equal created + ttl_seconds → EXPIRES_MISMATCH", () => {
@@ -198,6 +210,10 @@ test("isIso8601Utc", () => {
   assert.equal(isIso8601Utc("2026-07-11T12:00:00.123Z"), true);
   assert.equal(isIso8601Utc("2026-07-11T12:00:00+00:00"), false);
   assert.equal(isIso8601Utc("2026-13-40T00:00:00Z"), false);
+  // Impossible calendar dates that Date.parse silently rolls over (must not
+  // be accepted): Feb has no 30th, April no 31st.
+  assert.equal(isIso8601Utc("2026-02-30T00:00:00Z"), false);
+  assert.equal(isIso8601Utc("2026-04-31T00:00:00Z"), false);
   assert.equal(isIso8601Utc("2026-07-11 12:00:00Z"), false);
   assert.equal(isIso8601Utc(42), false);
 });

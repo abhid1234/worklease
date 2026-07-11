@@ -53,7 +53,14 @@ const ISO8601_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 const UNSUPPORTED_GLOB_CHARS = /[?[\]{}]/;
 
 export function isIso8601Utc(s) {
-  return typeof s === "string" && ISO8601_UTC.test(s) && !Number.isNaN(Date.parse(s));
+  if (typeof s !== "string" || !ISO8601_UTC.test(s)) return false;
+  const ms = Date.parse(s);
+  if (Number.isNaN(ms)) return false;
+  // Date.parse silently rolls over impossible calendar dates (e.g.
+  // 2026-02-30 → Mar 2, 2026-04-31 → May 1) instead of returning NaN, so a
+  // format-valid but nonexistent date would slip through. Round-trip the
+  // parsed value and require the calendar portion to match the input.
+  return new Date(ms).toISOString().slice(0, 10) === s.slice(0, 10);
 }
 
 export function isAllowedGlob(s) {
