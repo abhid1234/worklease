@@ -8,11 +8,13 @@
 //  - `list`: show active claims (who holds what, expiring when).
 //  - `release <id>`: drop a claim by appending a release record.
 //  - `conformance <registry> <merges>`: score whether merges respected claims.
+//  - `hook install|run`: git pre-commit adapter — auto-`check` staged files.
 
 import { readFileSync } from "node:fs";
 import { validateClaim, validateRegistry } from "../src/schema.js";
 import { check } from "../src/check.js";
 import { conformance } from "../src/conformance.js";
+import { stagedPaths, checkStagedPaths, installHook } from "../src/adapters/git-hook.js";
 import { makeClaim, parseTtl } from "../src/claim.js";
 import {
   loadRegistry,
@@ -44,12 +46,21 @@ Usage:
       a merges file (each agent's touched files) and reports a coordination
       score, respected/total, violations, and warnings. Exit 0 = no violations,
       1 = at least one violation.
+  worklease hook install [--strict] [--registry <path>]
+      Install a git pre-commit hook that runs \`worklease check\` on staged
+      files. Advisory by default (prints conflicts, never blocks); --strict
+      blocks the commit on a conflict. Idempotent; preserves an existing hook.
+  worklease hook run [--strict] [--agent <id>] [--registry <path>] [--json]
+      What the hook runs: check the staged files for overlap with another
+      agent's active claim. Exit 0 by default even on conflict; --strict exits 1
+      on conflict so git aborts the commit.
 
 Flags:
   --intent <str>     why you're claiming (required for \`claim\`)
   --ttl <dur>        lease length: <n>s|m|h or bare seconds (claim; default 30m)
   --all              include released/expired claims (list)
   --verbose          warn about skipped/tampered/expired lines to stderr (list)
+  --strict           block the commit on a conflict (hook install / hook run)
   --agent <id>       identify "me" (env WORKLEASE_AGENT); own claims are clear
   --registry <path>  registry file (default: env WORKLEASE_REGISTRY or
                      .worklease/registry.jsonl)
@@ -500,6 +511,125 @@ function runConformance(args) {
   process.exit(result.violations.length === 0 ? 0 : 1);
 }
 
+// `hook` subcommand implementation
+//
+// A small verb group over the git pre-commit adapter:
+//   hook install [--strict] [--registry] — write/refresh the pre-commit hook.
+//   hook run     [--strict] [--agent] [--registry] [--json] — what the hook runs.
+function parseHookArgs(args, { positional = false } = {}) {
+  let strict = false;
+  let agent = process.env.WORKLEASE_AGENT || null;
+  let registry = null;
+  let json = false;
+  const rest = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--json") {
+      json = true;
+    } else if (a === "--strict") {
+      strict = true;
+    } else if (a === "--agent") {
+      agent = args[++i];
+      if (agent == null) fail("error: --agent requires a value\n\n" + USAGE);
+    } else if (a === "--registry") {
+      registry = args[++i];
+      if (registry == null) fail("error: --registry requires a value\n\n" + USAGE);
+    } else if (a.startsWith("--")) {
+      fail(`error: unknown flag: ${a}\n\n` + USAGE);
+    } else if (positional) {
+      rest.push(a);
+    } else {
+      fail(`error: unexpected argument: ${a}\n\n` + USAGE);
+    }
+  }
+  return { strict, agent, registry, json, rest };
+}
+
+function runHookInstall(args) {
+  const { strict, registry } = parseHookArgs(args);
+
+  let result;
+  try {
+    result = installHook({ strict });
+  } catch (e) {
+    fail(`error: ${e.message}`);
+    return;
+  }
+
+  const mode = strict ? "strict (blocks on conflict)" : "advisory (warn-only)";
+  process.stdout.write(
+    `${result.action} pre-commit hook at ${result.path} — ${mode}\n`
+  );
+  // The hook runs `worklease check`, which resolves the registry the same way
+  // every other verb does; note when a non-default registry was requested so
+  // the operator sets WORKLEASE_REGISTRY for the hook's environment too.
+  if (registry) {
+    process.stdout.write(
+      `note: set WORKLEASE_REGISTRY=${registry} in the hook's environment to check that registry\n`
+    );
+  }
+  process.exit(0);
+}
+
+function runHookRun(args) {
+  const { strict, agent, registry, json } = parseHookArgs(args);
+
+  const paths = stagedPaths();
+  const now = Date.now();
+  const { clear, conflicts, notes } = checkStagedPaths(paths, {
+    registry,
+    agent,
+    now,
+  });
+  // Same as `check`: a dropped registry line could hide a real hold, so always
+  // surface it — the warning is the only mitigation.
+  warnNotes(notes);
+
+  if (json) {
+    process.stdout.write(JSON.stringify({ clear, conflicts }) + "\n");
+  } else if (clear) {
+    process.stdout.write("clear ✓ — staged files overlap no active claim\n");
+  } else {
+    const n = conflicts.length;
+    process.stdout.write(
+      `⚠ conflict — staged files overlap ${n} active claim${n === 1 ? "" : "s"}:\n`
+    );
+    for (const { claim, overlapping_globs } of conflicts) {
+      process.stdout.write(
+        `  ${claim.agent} holds ${overlapping_globs.join(", ")} — ` +
+          `"${claim.intent}" (expires ${claim.expires})\n`
+      );
+    }
+    if (!strict) {
+      process.stdout.write(
+        "  (advisory: commit not blocked — install with --strict to block)\n"
+      );
+    }
+  }
+
+  // Advisory by default: exit 0 even on conflict so git never aborts the commit.
+  // --strict makes a conflict fatal (exit 1), which aborts the commit.
+  process.exit(strict && !clear ? 1 : 0);
+}
+
+function runHook(args) {
+  const sub = args[0];
+  if (sub === "install") {
+    runHookInstall(args.slice(1));
+    return;
+  }
+  if (sub === "run") {
+    runHookRun(args.slice(1));
+    return;
+  }
+  if (sub == null) {
+    fail("error: `hook` requires a subcommand: install | run\n\n" + USAGE);
+    return;
+  }
+  fail(`error: unknown hook subcommand: ${sub} (expected install | run)\n\n` + USAGE);
+}
+
 // Main router
 function main(argv) {
   const args = argv.slice(2);
@@ -523,6 +653,10 @@ function main(argv) {
   }
   if (command === "conformance") {
     runConformance(args.slice(1));
+    return;
+  }
+  if (command === "hook") {
+    runHook(args.slice(1));
     return;
   }
   if (command === "validate") {

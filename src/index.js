@@ -4,6 +4,7 @@
 // Re-exports the pure `conformance` after-the-fact coordination-score API.
 // Re-exports the pure `makeClaim` / `parseTtl` claim-constructor API.
 // Re-exports the append-only registry store (`loadRegistry`, `appendRecord`, …).
+// Re-exports the git pre-commit adapter (`checkStagedPaths`, `installHook`, …).
 
 export {
   validateClaim,
@@ -29,3 +30,10 @@ export {
   formatRelative,
   shortId,
 } from "./registry.js";
+export {
+  stagedPaths,
+  checkStagedPaths,
+  hookPath,
+  renderHookBlock,
+  installHook,
+} from "./adapters/git-hook.js";
