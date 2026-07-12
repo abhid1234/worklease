@@ -1,31 +1,30 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateClaim } from "../src/schema.js";
+import { computeRecordId, appendRecord } from "../src/registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = join(__dirname, "..", "bin", "worklease.js");
 
 // Run the CLI as a child process. Returns { status, stdout, stderr }.
 function run(args, env = {}) {
-  try {
-    const stdout = execFileSync("node", [CLI, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...env },
-    });
-    return { status: 0, stdout, stderr: "" };
-  } catch (e) {
-    return {
-      status: e.status ?? 1,
-      stdout: e.stdout?.toString() ?? "",
-      stderr: e.stderr?.toString() ?? "",
-    };
-  }
+  // spawnSync returns both stdout and stderr regardless of exit code, so warnings
+  // emitted to stderr on a 0 exit (e.g. `list --all` skip notes) stay observable.
+  const r = spawnSync("node", [CLI, ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...env },
+  });
+  return {
+    status: r.status ?? 1,
+    stdout: r.stdout ?? "",
+    stderr: r.stderr ?? "",
+  };
 }
 
 const validClaim = {
@@ -43,15 +42,18 @@ const validClaim = {
 const ACTIVE = "2099-01-01T00:00:00Z";
 const EXPIRED = "2000-01-01T00:00:00Z";
 
+// Build a self-consistent registry claim record: its `id` is its own content
+// hash, so it survives `loadRegistry`'s integrity filter (any hand-set `o.id` is
+// ignored — the store is content-addressed).
 function record(o) {
-  return {
-    id: o.id,
+  const r = {
     agent: o.agent,
     globs: o.globs,
     intent: o.intent ?? "work",
     expires: o.expires ?? ACTIVE,
     status: o.status ?? "active",
   };
+  return { id: computeRecordId(r), ...r };
 }
 
 let dir;
@@ -198,12 +200,18 @@ test("WORKLEASE_AGENT env has the same effect as --agent", () => {
   assert.match(r.stdout, /clear/);
 });
 
-test("latest record per id wins (released supersedes active)", () => {
-  const reg = registry("resolve.jsonl", [
-    { id: "1", agent: "other", globs: ["src/auth/**"], status: "active" },
-    { id: "1", agent: "other", globs: ["src/auth/**"], status: "released" },
-  ]);
-  const r = run(["check", "src/auth/x.ts", "--registry", reg, "--json"]);
+test("a release record supersedes its claim (check sees it as clear)", () => {
+  const claim = record({ agent: "other", globs: ["src/auth/**"], status: "active" });
+  const release = {
+    type: "release",
+    claim_id: claim.id,
+    agent: "other",
+    at: "2026-07-11T12:00:00Z",
+  };
+  release.id = computeRecordId(release);
+  const p = join(dir, "resolve.jsonl");
+  writeFileSync(p, [claim, release].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const r = run(["check", "src/auth/x.ts", "--registry", p, "--json"]);
   assert.equal(r.status, 0);
   assert.deepEqual(JSON.parse(r.stdout), { clear: true, conflicts: [] });
 });
@@ -392,4 +400,215 @@ test("a filed claim is immediately visible to check (round-trip)", () => {
   const self = run(["check", "src/auth/login.ts", "--registry", reg, "--agent", "a1"]);
   assert.equal(self.status, 0);
   assert.match(self.stdout, /clear/);
+});
+
+// --- list ------------------------------------------------------------------
+
+// File a claim via the CLI and return its parsed record (via --json).
+function fileClaim(reg, globs, opts = {}) {
+  const args = [
+    "claim", globs,
+    "--intent", opts.intent ?? "work",
+    "--agent", opts.agent ?? "a1",
+    "--registry", reg, "--json",
+  ];
+  if (opts.ttl) args.push("--ttl", opts.ttl);
+  const r = run(args);
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+test("list on a missing registry → 'no active claims', exit 0", () => {
+  const r = run(["list", "--registry", join(dir, "list-missing.jsonl")]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /no active claims/);
+});
+
+test("list --json on empty registry → []", () => {
+  const r = run(["list", "--registry", join(dir, "list-empty.jsonl"), "--json"]);
+  assert.equal(r.status, 0);
+  assert.deepEqual(JSON.parse(r.stdout), []);
+});
+
+test("list shows active claims sorted by soonest expiry", () => {
+  const reg = join(dir, "list-sorted.jsonl");
+  const later = fileClaim(reg, "src/a/**", { ttl: "1h", intent: "slow" });
+  const sooner = fileClaim(reg, "src/b/**", { ttl: "5m", intent: "fast" });
+
+  const r = run(["list", "--registry", reg]);
+  assert.equal(r.status, 0);
+  // Soonest expiry first: the 5m claim's short id appears before the 1h claim's.
+  const idxSooner = r.stdout.indexOf(sooner.id.slice(0, 8));
+  const idxLater = r.stdout.indexOf(later.id.slice(0, 8));
+  assert.ok(idxSooner !== -1 && idxLater !== -1);
+  assert.ok(idxSooner < idxLater, "5m claim should list before 1h claim");
+});
+
+test("list --json returns the resolved active claim array", () => {
+  const reg = join(dir, "list-json.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  const r = run(["list", "--registry", reg, "--json"]);
+  assert.equal(r.status, 0);
+  const arr = JSON.parse(r.stdout);
+  assert.equal(arr.length, 1);
+  assert.equal(arr[0].status, "active");
+  assert.equal(arr[0].agent, "a1");
+});
+
+test("list --agent filters to one holder", () => {
+  const reg = join(dir, "list-agent.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  fileClaim(reg, "src/b/**", { agent: "a2" });
+  const r = run(["list", "--registry", reg, "--agent", "a2", "--json"]);
+  assert.equal(r.status, 0);
+  const arr = JSON.parse(r.stdout);
+  assert.equal(arr.length, 1);
+  assert.equal(arr[0].agent, "a2");
+});
+
+test("list default hides expired; --all shows it labeled", () => {
+  const reg = join(dir, "list-expired.jsonl");
+  // Directly append an already-expired claim (past expires) via the store.
+  appendRecord(reg, {
+    agent: "a1", globs: ["src/x/**"], intent: "old",
+    ttl_seconds: 60, created: "2000-01-01T00:00:00Z", expires: EXPIRED, status: "active",
+  });
+  assert.match(run(["list", "--registry", reg]).stdout, /no active claims/);
+  const all = run(["list", "--registry", reg, "--all"]);
+  assert.equal(all.status, 0);
+  assert.match(all.stdout, /expired/);
+});
+
+// A dropped (corrupt/tampered/stale) line must not vanish silently: the promised
+// warning is the only mitigation, else two agents can both be told a path is clear.
+test("list --all warns to stderr about a skipped unparseable line", () => {
+  const reg = join(dir, "list-warn-all.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "this is not json\n");
+  const r = run(["list", "--registry", reg, "--all"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /warning:.*skipped/i);
+});
+
+test("list --verbose warns even without --all", () => {
+  const reg = join(dir, "list-warn-verbose.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "{ broken\n");
+  const r = run(["list", "--registry", reg, "--verbose"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /warning:.*skipped/i);
+});
+
+test("plain list stays quiet on stderr (warnings gated behind --all/--verbose)", () => {
+  const reg = join(dir, "list-warn-plain.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "not json\n");
+  const r = run(["list", "--registry", reg]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stderr, "");
+});
+
+test("check warns to stderr about a skipped line so a dropped claim is visible", () => {
+  const reg = join(dir, "check-warn.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "garbage line\n");
+  // A different path, so the surviving claim doesn't conflict — the point is the
+  // warning fires regardless of the clear/conflict verdict.
+  const r = run(["check", "src/z/**", "--registry", reg, "--agent", "a2"]);
+  assert.match(r.stderr, /warning:.*skipped/i);
+});
+
+// --- release ---------------------------------------------------------------
+
+test("release <full id> appends a release; the claim leaves the active list", () => {
+  const reg = join(dir, "release-full.jsonl");
+  const claim = fileClaim(reg, "src/a/**", { agent: "a1" });
+  const before = readFileSync(reg, "utf8").split("\n").filter((l) => l.trim()).length;
+
+  const r = run(["release", claim.id, "--registry", reg, "--agent", "a1"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /released/);
+  assert.match(r.stdout, new RegExp(claim.id.slice(0, 8)));
+
+  // Append-only: exactly one new line, none removed.
+  const after = readFileSync(reg, "utf8").split("\n").filter((l) => l.trim()).length;
+  assert.equal(after, before + 1);
+
+  // No longer active.
+  assert.match(run(["list", "--registry", reg]).stdout, /no active claims/);
+});
+
+test("release by unambiguous prefix works", () => {
+  const reg = join(dir, "release-prefix.jsonl");
+  const claim = fileClaim(reg, "src/a/**", { agent: "a1" });
+  const r = run(["release", claim.id.slice(0, 8), "--registry", reg]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /released/);
+});
+
+test("release --json emits the appended release record", () => {
+  const reg = join(dir, "release-json.jsonl");
+  const claim = fileClaim(reg, "src/a/**", { agent: "a1" });
+  const r = run(["release", claim.id, "--registry", reg, "--agent", "a1", "--json"]);
+  assert.equal(r.status, 0);
+  const rel = JSON.parse(r.stdout);
+  assert.equal(rel.type, "release");
+  assert.equal(rel.claim_id, claim.id);
+  assert.equal(rel.agent, "a1");
+  assert.ok(rel.id);
+});
+
+test("release of an unknown id → error, exit 1", () => {
+  const reg = join(dir, "release-unknown.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  const r = run(["release", "deadbeefdeadbeef", "--registry", reg]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no claim/);
+});
+
+test("release with an ambiguous prefix → error, exit 1", () => {
+  const reg = join(dir, "release-ambig.jsonl");
+  // Append claims until two share a leading hex char (pigeonhole: ≤17 needed).
+  const seen = new Set();
+  let prefix = null;
+  for (let i = 0; i < 40 && prefix == null; i++) {
+    const rec = appendRecord(reg, {
+      agent: "a1", globs: [`src/x${i}/**`], intent: "w",
+      ttl_seconds: 3600, created: "2099-01-01T00:00:00Z",
+      expires: "2099-01-01T01:00:00Z", status: "active",
+    });
+    const head = rec.id[0];
+    if (seen.has(head)) prefix = head;
+    else seen.add(head);
+  }
+  assert.ok(prefix, "expected a colliding leading hex char");
+  const r = run(["release", prefix, "--registry", reg]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /ambiguous/);
+});
+
+test("release of an already-released claim → note, no new line, exit 0", () => {
+  const reg = join(dir, "release-twice.jsonl");
+  const claim = fileClaim(reg, "src/a/**", { agent: "a1" });
+  run(["release", claim.id, "--registry", reg, "--agent", "a1"]);
+  const lines = readFileSync(reg, "utf8").split("\n").filter((l) => l.trim()).length;
+
+  const r = run(["release", claim.id, "--registry", reg, "--agent", "a1"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /already released/);
+  const after = readFileSync(reg, "utf8").split("\n").filter((l) => l.trim()).length;
+  assert.equal(after, lines, "no new line appended for a no-op release");
+});
+
+test("release records who released it, noting a non-holder", () => {
+  const reg = join(dir, "release-other.jsonl");
+  const claim = fileClaim(reg, "src/a/**", { agent: "a1" });
+  const r = run(["release", claim.id, "--registry", reg, "--agent", "a2", "--json"]);
+  assert.equal(r.status, 0);
+  assert.equal(JSON.parse(r.stdout).agent, "a2");
+  // The claim was held by a1 — still resolvable as released.
+  const all = run(["list", "--registry", reg, "--all", "--json"]);
+  const arr = JSON.parse(all.stdout);
+  assert.equal(arr[0].status, "released");
+  assert.equal(arr[0].released_by, "a2");
 });

@@ -39,8 +39,8 @@ worklease claim "src/api/**" --intent "rate limits" --json    # print the claim 
   missing).
 - `--json` — print the created claim object instead of the human summary.
 
-The written record is a fully-valid claim: `id` is a deterministic content hash
-of the claim's identifying fields, and `expires` is `created + ttl`. The claim is
+The written record is a fully-valid claim: `id` is the registry's deterministic
+content hash of the record, and `expires` is `created + ttl`. The claim is
 validated before it's written, so an unsupported glob is rejected rather than
 appended. Exit `0` on write, `1` on any input or validation error.
 
@@ -66,6 +66,57 @@ worklease check "src/auth/**" --agent me      # my own claims count as clear
 - `--json` — emit `{ clear, conflicts }` verbatim.
 - Exit `0` when clear, `1` when any conflict — an advisory signal a pre-edit hook
   can gate on, not a hard lock.
+
+### `worklease list`
+
+Shows the active claims — who holds what, and when each lease expires — resolved
+from the append log at read time (latest claim per id, releases applied, and
+TTL-expired claims treated as inactive). One row each, sorted by soonest expiry.
+
+```bash
+worklease list                     # active claims: agent, globs, intent, expiry, id8
+worklease list --all               # also released + expired, labeled
+worklease list --agent me          # only my claims
+worklease list --json              # the resolved claim array, for harnesses
+```
+
+- `--all` — include `released` and `expired` claims, each labeled with its
+  effective status (default shows only `active`).
+- `--agent <id>` — filter to a single holder.
+- `--json` — emit the resolved claim array verbatim (each claim carries its
+  effective `status`).
+- `--registry <path>` (or `WORKLEASE_REGISTRY`) — registry file location.
+- An empty or missing registry prints `no active claims` (`[]` under `--json`)
+  and exits `0`.
+
+### `worklease release <id>`
+
+Drops a claim you're done with by **appending** a release record — it never edits
+or deletes the original claim line, so a concurrent writer can't be lost.
+
+```bash
+worklease release fb964bcd                 # by short id (unambiguous prefix)
+worklease release <full-id> --agent me     # record who released it
+worklease release <id> --json              # print the appended release record
+```
+
+- Resolves the target by full `id` or an **unambiguous** id prefix (the short ids
+  `list` prints work); an ambiguous prefix or an unknown id is an error (exit `1`).
+- `--agent <id>` (or `WORKLEASE_AGENT`) — who is releasing; a release by someone
+  other than the holder is allowed but noted (advisory cleanup across the fleet).
+- Releasing an already-`released` or already-`expired` claim is a **no-op** with a
+  note (still exit `0` — the desired end state already holds).
+- `--registry <path>` (or `WORKLEASE_REGISTRY`) — registry file location.
+
+### The registry
+
+The store is an **append-only JSONL file** (default `.worklease/registry.jsonl`),
+meant to be **committed** so it's shareable across worktrees and harnesses. New
+records are appended as whole lines; existing lines are never rewritten. Every
+record's `id` is a content hash of its own content, so a duplicated append is
+idempotent on read and two agents appending at once union-merge cleanly instead
+of conflicting. A line that fails its integrity check (or won't parse) is skipped
+with a note — one bad line never discards the rest of the registry.
 
 Dogfood target: the author's own parallel-agent software factory + Conductor sessions.
 

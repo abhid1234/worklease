@@ -5,12 +5,20 @@
 //  - `validate <file>`: validate a claim or registry file.
 //  - `check <globs...>`: check for overlap with active claims.
 //  - `claim <globs...>`: file a claim (append to the registry).
+//  - `list`: show active claims (who holds what, expiring when).
+//  - `release <id>`: drop a claim by appending a release record.
 
-import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { validateClaim, validateRegistry } from "../src/schema.js";
 import { check } from "../src/check.js";
 import { makeClaim, parseTtl } from "../src/claim.js";
+import {
+  loadRegistry,
+  appendRecord,
+  defaultRegistryPath,
+  formatRelative,
+  shortId,
+} from "../src/registry.js";
 
 const USAGE = `worklease — coordination format for fleets of AI coding agents
 
@@ -22,10 +30,19 @@ Usage:
   worklease claim <globs...> --intent "<why>" [--ttl <dur>] [--agent <id>]
                              [--registry <path>] [--json]
       File a claim for the globs and append it to the registry. Exit 0 on write.
+  worklease list [--all] [--verbose] [--agent <id>] [--registry <path>] [--json]
+      Show active claims: who holds what, expiring when. --all also shows
+      released/expired claims labeled with their effective status. --all or
+      --verbose also warn (to stderr) about skipped/tampered/expired lines.
+  worklease release <id> [--agent <id>] [--registry <path>] [--json]
+      Drop a claim (full id or unambiguous prefix) by appending a release
+      record. No-op with a note if it is already released/expired.
 
 Flags:
   --intent <str>     why you're claiming (required for \`claim\`)
   --ttl <dur>        lease length: <n>s|m|h or bare seconds (claim; default 30m)
+  --all              include released/expired claims (list)
+  --verbose          warn about skipped/tampered/expired lines to stderr (list)
   --agent <id>       identify "me" (env WORKLEASE_AGENT); own claims are clear
   --registry <path>  registry file (default: env WORKLEASE_REGISTRY or
                      .worklease/registry.jsonl)
@@ -34,6 +51,14 @@ Flags:
 function fail(message) {
   process.stderr.write(`${message}\n`);
   process.exit(1);
+}
+
+// Surface loadRegistry/resolveRecords `notes` (skipped/tampered/expired lines)
+// to stderr as warnings. A dropped line is a corrupt/stale/tampered claim, and
+// PRODUCT.md decision 3 makes the warning the mitigation: without it a dropped
+// claim silently vanishes and two agents can both be told a path is clear.
+function warnNotes(notes) {
+  for (const note of notes) process.stderr.write(`warning: ${note}\n`);
 }
 
 // `validate` subcommand implementation
@@ -83,29 +108,6 @@ function runValidate(args) {
 
 
 // `check` subcommand implementation
-function defaultRegistryPath() {
-  return (
-    process.env.WORKLEASE_REGISTRY || join(process.cwd(), ".worklease", "registry.jsonl")
-  );
-}
-
-function loadRegistry(path) {
-  let raw;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return []; // missing file → empty registry
-  }
-  const latest = new Map();
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const record = JSON.parse(trimmed);
-    latest.set(record.id, record);
-  }
-  return [...latest.values()];
-}
-
 function parseCheckArgs(args) {
   const globs = [];
   let agent = process.env.WORKLEASE_AGENT || null;
@@ -140,8 +142,12 @@ function runCheck(args) {
   }
 
   const path = registry || defaultRegistryPath();
-  const claims = loadRegistry(path);
-  const result = check(globs, claims, { agent, now: Date.now() });
+  const now = Date.now();
+  const { claims, notes } = loadRegistry(path, { now });
+  // Always warn: a claim dropped here means `check` may report `clear` for a
+  // path another agent actually holds — the exact collision worklease prevents.
+  warnNotes(notes);
+  const result = check(globs, claims, { agent, now });
 
   if (json) {
     process.stdout.write(JSON.stringify(result) + "\n");
@@ -238,12 +244,10 @@ function runClaim(args) {
   }
 
   const path = registry || defaultRegistryPath();
-  // Append-only: ensure the parent dir exists, then write one JSON line. Existing
-  // lines are never rewritten, so concurrent claims can't corrupt the file.
-  // (Registry issue #4 owns the durable store; this interim appender is minimal
-  // and isolated so #4 can replace it without touching makeClaim.)
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, JSON.stringify(claim) + "\n");
+  // Append-only via the shared store: one whole JSON line, existing lines never
+  // rewritten, parent dir created if missing. The claim already carries its
+  // content-hash id, so appendRecord writes it verbatim.
+  appendRecord(path, claim);
 
   if (json) {
     process.stdout.write(JSON.stringify(claim) + "\n");
@@ -252,6 +256,151 @@ function runClaim(args) {
       `filed ${claim.id} — ${claim.agent} holds ${claim.globs.join(", ")} — ` +
         `"${claim.intent}" (expires ${claim.expires})\n`
     );
+  }
+  process.exit(0);
+}
+
+// `list` subcommand implementation
+function parseListArgs(args) {
+  let all = false;
+  let verbose = false;
+  let agent = null;
+  let registry = null;
+  let json = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--json") {
+      json = true;
+    } else if (a === "--all") {
+      all = true;
+    } else if (a === "--verbose") {
+      verbose = true;
+    } else if (a === "--agent") {
+      agent = args[++i];
+      if (agent == null) fail("error: --agent requires a value\n\n" + USAGE);
+    } else if (a === "--registry") {
+      registry = args[++i];
+      if (registry == null) fail("error: --registry requires a value\n\n" + USAGE);
+    } else if (a.startsWith("--")) {
+      fail(`error: unknown flag: ${a}\n\n` + USAGE);
+    } else {
+      fail(`error: \`list\` takes no positional arguments (got: ${a})\n\n` + USAGE);
+    }
+  }
+  return { all, verbose, agent, registry, json };
+}
+
+function runList(args) {
+  const { all, verbose, agent, registry, json } = parseListArgs(args);
+
+  const path = registry || defaultRegistryPath();
+  const now = Date.now();
+  const { claims, notes } = loadRegistry(path, { now });
+  // Surface skipped/tampered/expired notes to stderr under --all or --verbose,
+  // so a dropped (corrupt/stale) claim is visible rather than silently gone.
+  if (all || verbose) warnNotes(notes);
+
+  let rows = all ? claims : claims.filter((c) => c.status === "active");
+  if (agent != null) rows = rows.filter((c) => c.agent === agent);
+
+  if (json) {
+    process.stdout.write(JSON.stringify(rows) + "\n");
+    process.exit(0);
+  }
+
+  if (rows.length === 0) {
+    process.stdout.write("no active claims\n");
+    process.exit(0);
+  }
+
+  for (const c of rows) {
+    // Active rows show the relative expiry; released/expired rows show the label.
+    const when = c.status === "active" ? `expires ${formatRelative(c.expires, now)}` : c.status;
+    process.stdout.write(
+      `${c.agent}  ${c.globs.join(", ")}  "${c.intent}"  ${when}  ${shortId(c.id)}\n`
+    );
+  }
+  process.exit(0);
+}
+
+// `release` subcommand implementation
+function parseReleaseArgs(args) {
+  let id = null;
+  let agent = process.env.WORKLEASE_AGENT || null;
+  let registry = null;
+  let json = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--json") {
+      json = true;
+    } else if (a === "--agent") {
+      agent = args[++i];
+      if (agent == null) fail("error: --agent requires a value\n\n" + USAGE);
+    } else if (a === "--registry") {
+      registry = args[++i];
+      if (registry == null) fail("error: --registry requires a value\n\n" + USAGE);
+    } else if (a.startsWith("--")) {
+      fail(`error: unknown flag: ${a}\n\n` + USAGE);
+    } else if (id == null) {
+      id = a;
+    } else {
+      fail(`error: \`release\` takes a single <id> (extra: ${a})\n\n` + USAGE);
+    }
+  }
+  return { id, agent, registry, json };
+}
+
+function runRelease(args) {
+  const { id, agent, registry, json } = parseReleaseArgs(args);
+
+  if (id == null || id.trim().length === 0) {
+    fail("error: `release` requires a claim <id>\n\n" + USAGE);
+    return;
+  }
+
+  const path = registry || defaultRegistryPath();
+  const now = Date.now();
+  const { claims } = loadRegistry(path, { now });
+
+  // Resolve the target: exact id first, else a unique id prefix.
+  let target = claims.find((c) => c.id === id);
+  if (!target) {
+    const matches = claims.filter((c) => c.id.startsWith(id));
+    if (matches.length > 1) {
+      fail(`error: ambiguous id prefix "${id}" matches ${matches.length} claims`);
+      return;
+    }
+    target = matches[0];
+  }
+  if (!target) {
+    fail(`error: no claim with id "${id}"`);
+    return;
+  }
+
+  // Already inactive → the desired end state already holds; note and stop.
+  if (target.status === "released" || target.status === "expired") {
+    const note =
+      target.status === "released"
+        ? `already released — nothing to do (${shortId(target.id)})`
+        : `already expired — nothing to do (${shortId(target.id)})`;
+    process.stdout.write(note + "\n");
+    process.exit(0);
+  }
+
+  const releaser = agent != null && agent.trim().length > 0 ? agent : "unknown";
+  const release = appendRecord(path, {
+    type: "release",
+    claim_id: target.id,
+    agent: releaser,
+    at: new Date(now).toISOString(),
+  });
+
+  if (json) {
+    process.stdout.write(JSON.stringify(release) + "\n");
+  } else {
+    process.stdout.write(`released ${shortId(target.id)} (held by ${target.agent})\n`);
   }
   process.exit(0);
 }
@@ -267,6 +416,14 @@ function main(argv) {
   }
   if (command === "claim") {
     runClaim(args.slice(1));
+    return;
+  }
+  if (command === "list") {
+    runList(args.slice(1));
+    return;
+  }
+  if (command === "release") {
+    runRelease(args.slice(1));
     return;
   }
   if (command === "validate") {
