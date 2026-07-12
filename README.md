@@ -67,6 +67,40 @@ worklease check "src/auth/**" --agent me      # my own claims count as clear
 - Exit `0` when clear, `1` when any conflict — an advisory signal a pre-edit hook
   can gate on, not a hard lock.
 
+### `worklease conformance <registry> <merges>`
+
+Scores, **after the fact**, whether the fleet actually coordinated. `claim`/`check`
+coordinate *before* the edit; `conformance` closes the loop: given the registry and
+a **merges** file (the files each agent actually touched), it reports how well the
+merges respected the claims.
+
+```bash
+worklease conformance registry.jsonl merges.json          # human summary; exit 1 on any violation
+worklease conformance registry.jsonl merges.json --json   # { score, total, respected, violations, warnings }
+```
+
+The merges file is a JSON array (or JSONL, one record per line) of
+`{ agent, files: ["path", …], at? }` — `agent` is who made the change, `files` are
+the concrete paths they touched, and the optional `at` (ISO-8601-UTC) is when the
+change landed. Each `(agent, file)` pair is one **change**, classified as exactly one of:
+
+- **respected** — the acting agent held a matching claim *and* the file wasn't under
+  another agent's live claim. These are the coordination numerator.
+- **violation** — the file fell under a **different** agent's claim that was active at
+  the change time (`created ≤ at < expires`; falls back to claim `status === "active"`
+  when a record has no `at`). One entry per conflicting claim, with the full claim record.
+- **warning** — the agent held no matching claim and nobody else did either: an edit to
+  an *unclaimed* file. It lowers the score but is not a collision.
+
+`score` is `respected / total` (a float in `[0, 1]`, `1` when there are no changes). So a
+fleet that never claims anything scores `0` — the score rewards coverage, not just the
+absence of collisions. Overlap reuses the same glob core as `check`. Exit `0` when there
+are **no violations**, `1` otherwise; a low score from warnings alone is advisory and does
+not fail. Missing registry or merges files are treated as empty inputs.
+
+The library also exports the pure `conformance(claims, merges, opts)` core (no I/O, no
+clock — time comes from each merge's `at`) for scoring programmatically.
+
 Dogfood target: the author's own parallel-agent software factory + Conductor sessions.
 
 Status: **drafting** — see [`roadmap.md`](roadmap.md). MIT · zero dependencies · harness-neutral.
