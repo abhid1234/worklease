@@ -18,6 +18,35 @@ worklease conformance registry.jsonl merges.json               # did the fleet a
 
 Same open-format-and-conformance playbook as [opentrajectory](https://github.com/abhid1234/opentrajectory) and [constraintguard](https://github.com/abhid1234/constraintguard) — the coordination standard for the one thing a fleet can't currently share: *what it's about to touch.*
 
+### `worklease claim <globs...>`
+
+Files a claim — declares that you intend to edit the given globs, for a reason,
+for a while — and **appends** it to the registry as one JSON line. This is the
+write verb: `check` only ever reports clear until someone has claimed something.
+
+```bash
+worklease claim "src/auth/**" --intent "add OAuth" --ttl 20m --agent me
+worklease claim "src/api/**" --intent "rate limits" --json    # print the claim object
+```
+
+- `--intent <str>` — **required**; why you're claiming (a claim without intent
+  isn't useful — it's what lets another agent decide to wait or pick other work).
+- `--ttl <dur>` — lease length: `<n>s`/`<n>m`/`<n>h` (e.g. `90s`, `20m`, `2h`) or a
+  bare integer number of seconds. Default `30m`.
+- `--agent <id>` (or `WORKLEASE_AGENT`) — who is filing; **required**.
+- `--registry <path>` (or `WORKLEASE_REGISTRY`) — registry file location
+  (default `.worklease/registry.jsonl`; the parent directory is created if
+  missing).
+- `--json` — print the created claim object instead of the human summary.
+
+The written record is a fully-valid claim: `id` is a deterministic content hash
+of the claim's identifying fields, and `expires` is `created + ttl`. The claim is
+validated before it's written, so an unsupported glob is rejected rather than
+appended. Exit `0` on write, `1` on any input or validation error.
+
+The library also exports the pure `makeClaim(globs, meta)` constructor (no I/O,
+no clock — `created` is passed in) for building claims programmatically.
+
 ### `worklease check <globs...>`
 
 Asks whether your planned edit overlaps any **active** claim held by **another**

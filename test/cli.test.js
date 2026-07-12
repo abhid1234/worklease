@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateClaim } from "../src/schema.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = join(__dirname, "..", "bin", "worklease.js");
@@ -249,4 +250,146 @@ test("validate without a file → error, exit 1", () => {
   const r = run(["validate"]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /requires a file/);
+});
+
+// --- claim -----------------------------------------------------------------
+
+// Read a JSONL registry file into an array of parsed records.
+function readRegistry(p) {
+  return readFileSync(p, "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l));
+}
+
+test("claim writes one valid line and exits 0", () => {
+  const reg = join(dir, "claim1.jsonl");
+  const r = run([
+    "claim", "src/auth/**",
+    "--intent", "add OAuth", "--ttl", "20m", "--agent", "a1",
+    "--registry", reg,
+  ]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /filed/);
+
+  const records = readRegistry(reg);
+  assert.equal(records.length, 1);
+  const claim = records[0];
+  assert.equal(validateClaim(claim).valid, true);
+  assert.equal(claim.status, "active");
+  assert.equal(claim.agent, "a1");
+  assert.deepEqual(claim.globs, ["src/auth/**"]);
+  assert.equal(claim.ttl_seconds, 1200);
+  assert.equal(Date.parse(claim.expires), Date.parse(claim.created) + 1200 * 1000);
+});
+
+test("a second claim appends (existing line preserved, append-only)", () => {
+  const reg = join(dir, "claim-append.jsonl");
+  run(["claim", "src/a/**", "--intent", "one", "--agent", "a1", "--registry", reg]);
+  const firstLine = readFileSync(reg, "utf8").split("\n")[0];
+  run(["claim", "src/b/**", "--intent", "two", "--agent", "a1", "--registry", reg]);
+
+  const raw = readFileSync(reg, "utf8");
+  assert.equal(raw.split("\n")[0], firstLine, "first line unchanged");
+  const records = readRegistry(reg);
+  assert.equal(records.length, 2);
+  assert.deepEqual(records.map((c) => c.globs[0]), ["src/a/**", "src/b/**"]);
+});
+
+test("claim --json prints the claim object, matching the written line", () => {
+  const reg = join(dir, "claim-json.jsonl");
+  const r = run([
+    "claim", "src/x/**", "--intent", "work", "--agent", "a1",
+    "--registry", reg, "--json",
+  ]);
+  assert.equal(r.status, 0);
+  const printed = JSON.parse(r.stdout);
+  assert.deepEqual(printed, readRegistry(reg)[0]);
+});
+
+test("default ttl is 1800 (30m) when --ttl omitted", () => {
+  const reg = join(dir, "claim-default-ttl.jsonl");
+  run(["claim", "src/**", "--intent", "work", "--agent", "a1", "--registry", reg]);
+  assert.equal(readRegistry(reg)[0].ttl_seconds, 1800);
+});
+
+test("--agent resolves from WORKLEASE_AGENT env", () => {
+  const reg = join(dir, "claim-env-agent.jsonl");
+  const r = run(
+    ["claim", "src/**", "--intent", "work", "--registry", reg],
+    { WORKLEASE_AGENT: "env-agent" }
+  );
+  assert.equal(r.status, 0);
+  assert.equal(readRegistry(reg)[0].agent, "env-agent");
+});
+
+test("missing --intent → error, exit 1, nothing appended", () => {
+  const reg = join(dir, "claim-no-intent.jsonl");
+  const r = run(["claim", "src/**", "--agent", "a1", "--registry", reg]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /intent/);
+  assert.equal(existsSync(reg), false);
+});
+
+test("missing agent (no flag, no env) → error, exit 1, nothing appended", () => {
+  const reg = join(dir, "claim-no-agent.jsonl");
+  const r = run(
+    ["claim", "src/**", "--intent", "work", "--registry", reg],
+    { WORKLEASE_AGENT: "" }
+  );
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /agent/);
+  assert.equal(existsSync(reg), false);
+});
+
+test("invalid --ttl → error, exit 1, nothing appended", () => {
+  const reg = join(dir, "claim-bad-ttl.jsonl");
+  const r = run([
+    "claim", "src/**", "--intent", "work", "--agent", "a1",
+    "--ttl", "20x", "--registry", reg,
+  ]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /invalid --ttl/);
+  assert.equal(existsSync(reg), false);
+});
+
+test("no globs → error, exit 1", () => {
+  const reg = join(dir, "claim-no-globs.jsonl");
+  const r = run(["claim", "--intent", "work", "--agent", "a1", "--registry", reg]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /one or more globs/);
+  assert.equal(existsSync(reg), false);
+});
+
+test("invalid glob → INVALID_GLOB reported, exit 1, nothing appended", () => {
+  const reg = join(dir, "claim-bad-glob.jsonl");
+  const r = run([
+    "claim", "src/**/*.ts?", "--intent", "work", "--agent", "a1",
+    "--registry", reg,
+  ]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /INVALID_GLOB/);
+  assert.equal(existsSync(reg), false);
+});
+
+test("registry parent dir is auto-created when missing", () => {
+  const reg = join(dir, "nested", "deep", "registry.jsonl");
+  const r = run(["claim", "src/**", "--intent", "work", "--agent", "a1", "--registry", reg]);
+  assert.equal(r.status, 0);
+  assert.equal(existsSync(reg), true);
+});
+
+test("a filed claim is immediately visible to check (round-trip)", () => {
+  const reg = join(dir, "claim-check.jsonl");
+  run(["claim", "src/auth/**", "--intent", "auth", "--agent", "a1", "--registry", reg]);
+
+  // A different agent planning an overlapping edit sees a conflict.
+  const other = run(["check", "src/auth/login.ts", "--registry", reg, "--agent", "a2"]);
+  assert.equal(other.status, 1);
+  assert.match(other.stdout, /a1/);
+
+  // The claiming agent is clear on their own claim.
+  const self = run(["check", "src/auth/login.ts", "--registry", reg, "--agent", "a1"]);
+  assert.equal(self.status, 0);
+  assert.match(self.stdout, /clear/);
 });
