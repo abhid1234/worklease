@@ -12,6 +12,7 @@ worklease check "src/auth/login.ts"                            # is anyone else 
 worklease list                                                  # who holds what, expiring when
 worklease release <id>                                          # done
 worklease conformance registry.jsonl merges.json               # did the fleet actually coordinate?
+worklease hook install                                         # auto-check staged files before every commit
 ```
 
 **Why it's different:** advisory, not a hard lock — it *warns and coordinates* so agents can pick different work. The registry is append-only JSONL with content-hash IDs, so it never merge-conflicts with itself even when many agents write at once. Harness-neutral: Claude Code, Codex, Cursor, or a factory worker.
@@ -140,6 +141,35 @@ time the change landed. Each record is flattened to one change per touched file.
   non-zero exit a hint a CI/merge gate *may* act on.
 - Missing registry or merges files are tolerated as empty inputs; a malformed
   merges JSON is a clear error (exit `1`).
+
+### `worklease hook install`
+
+Installs a **git pre-commit hook** that runs `worklease check` on the files a
+commit is about to change — the dogfood adapter that makes worklease actually
+catch collisions in a live parallel-agent setup, before the edit lands.
+
+```bash
+worklease hook install            # advisory: prints conflicts, never blocks a commit
+worklease hook install --strict   # strict: a conflict aborts the commit (exit 1)
+```
+
+The hook is **advisory by default** (roadmap principle #1 — coordinate, don't
+enforce): on a conflict it prints who holds the overlapping globs and lets the
+commit through. `--strict` makes a conflict fatal so git aborts the commit.
+Install is **idempotent** and **preserves an existing hook** — it manages only a
+marked block (`# >>> worklease >>>` … `# <<< worklease <<<`), so re-running it
+never duplicates the block or clobbers hand-written hook logic. A committed
+[`examples/pre-commit.sample`](examples/pre-commit.sample) shows what it writes.
+
+Under the hood the hook calls `worklease hook run`, which lists the staged files
+(`git diff --cached --name-only`) and checks them against active claims. Set
+`WORKLEASE_AGENT` in the commit environment so your own claims count as clear.
+
+```bash
+worklease hook run            # what the hook runs: check staged files (exit 0 even on conflict)
+worklease hook run --strict   # exit 1 on conflict, for a blocking hook
+worklease hook run --json     # { clear, conflicts: [...] } for tooling
+```
 
 ### The registry
 

@@ -1,0 +1,8 @@
+#!/bin/sh
+# >>> worklease >>>
+# Managed by `worklease hook install` — runs `worklease check` on staged files.
+# Mode: advisory — conflicts are printed but never block the commit.
+if command -v worklease >/dev/null 2>&1; then
+  worklease hook run
+fi
+# <<< worklease <<<
