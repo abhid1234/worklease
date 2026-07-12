@@ -108,6 +108,39 @@ worklease release <id> --json              # print the appended release record
   note (still exit `0` — the desired end state already holds).
 - `--registry <path>` (or `WORKLEASE_REGISTRY`) — registry file location.
 
+### `worklease conformance <registry> <merges>`
+
+Scores, **after the fact**, whether the fleet actually coordinated. Given the
+registry and a **merges** file — the concrete files each agent touched — it grades
+every `(agent, file)` change: did the acting agent hold a claim covering the file,
+and did it edit a file under another agent's live claim?
+
+```bash
+worklease conformance .worklease/registry.jsonl merges.json   # human summary; exit 1 on any violation
+worklease conformance registry.jsonl merges.json --json       # { score, total, respected, violations, warnings }
+```
+
+The **merges** file is a JSON array (or JSONL, one per line) of merge records
+`{ agent, files: ["path", …], at? }`, where `at` is the optional ISO-8601-UTC
+time the change landed. Each record is flattened to one change per touched file.
+
+- **respected** — the agent held a matching claim for the file *and* it collided
+  with no other agent's live claim. These are the numerator of the score.
+- **violation** — the file fell under a **different** agent's claim active at the
+  change time (temporal `created ≤ at < expires` when `at` is given, else the
+  claim's `status`). One entry per conflicting claim, each with the full
+  `conflicting_claim` record. This is the collision worklease exists to prevent.
+- **warning** — the change was **uncovered** and collided with no one (an edit to
+  an unclaimed file). It lowers the score but is **not** a failure.
+- `score` = `respected / total`, a float in `[0, 1]` (`1` when there are no
+  changes). A fleet that never claims anything scores `0` — the score rewards
+  coverage, not just the absence of collisions.
+- Exit `0` when there are **no violations**, `1` when any violation is found. A
+  low score from warnings alone does **not** fail — the score is advisory, the
+  non-zero exit a hint a CI/merge gate *may* act on.
+- Missing registry or merges files are tolerated as empty inputs; a malformed
+  merges JSON is a clear error (exit `1`).
+
 ### The registry
 
 The store is an **append-only JSONL file** (default `.worklease/registry.jsonl`),
