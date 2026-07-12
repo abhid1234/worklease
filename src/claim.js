@@ -6,7 +6,7 @@
 // CLI (`bin/worklease.js`) is the only part that reads the clock and appends to
 // the registry.
 
-import { createHash } from "node:crypto";
+import { computeRecordId } from "./registry.js";
 
 // makeClaim(globs, meta) → a claim record matching #1's CLAIM_FIELDS order.
 //
@@ -16,16 +16,16 @@ import { createHash } from "node:crypto";
 //   meta.created     — ISO-8601-UTC timestamp the claim is filed at
 //
 // `expires` is `created + ttl_seconds` to the millisecond, so #1's
-// EXPIRES_MISMATCH cross-check holds by construction. `id` is a content hash of
-// the identifying fields (agent, globs, intent, ttl_seconds, created); `status`
-// is always "active" on creation. Pure and total: it does not throw and does no
-// validation — the CLI validates the finished record via #1's `validateClaim`.
+// EXPIRES_MISMATCH cross-check holds by construction. `id` is the registry's
+// shared content hash of the whole record (its `id` excluded), so a claim's id
+// IS its content hash and it resolves cleanly through #4's store — one hasher
+// across every record type. `status` is always "active" on creation. Pure and
+// total: it does not throw and does no validation — the CLI validates the
+// finished record via #1's `validateClaim`.
 export function makeClaim(globs, meta = {}) {
   const { agent, intent, ttl_seconds, created } = meta;
   const expires = isoAddSeconds(created, ttl_seconds);
-  const id = claimId({ agent, globs, intent, ttl_seconds, created });
-  return {
-    id,
+  const record = {
     agent,
     globs,
     intent,
@@ -34,6 +34,7 @@ export function makeClaim(globs, meta = {}) {
     expires,
     status: "active",
   };
+  return { id: computeRecordId(record), ...record };
 }
 
 // parseTtl(input) → integer seconds, or null on anything invalid.
@@ -66,13 +67,4 @@ export function parseTtl(input) {
 // and integer `ttl_seconds`, epoch-ms equality with #1's derived value holds.
 function isoAddSeconds(created, ttl_seconds) {
   return new Date(Date.parse(created) + ttl_seconds * 1000).toISOString();
-}
-
-// Deterministic content hash of the identifying fields. Hashes a fixed-order
-// JSON array (not the object) so key ordering can never perturb the digest;
-// `expires` (derived) and `status` (lifecycle) are intentionally excluded.
-// SHA-256 via Node's built-in crypto, truncated to 16 hex chars.
-function claimId({ agent, globs, intent, ttl_seconds, created }) {
-  const canonical = JSON.stringify([agent, globs, intent, ttl_seconds, created]);
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }

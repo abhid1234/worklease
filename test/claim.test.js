@@ -49,7 +49,7 @@ test("id-stability: same inputs → same id across calls", () => {
   const a = makeClaim(["src/auth/**"], META);
   const b = makeClaim(["src/auth/**"], META);
   assert.equal(a.id, b.id);
-  assert.match(a.id, /^[0-9a-f]{16}$/);
+  assert.match(a.id, /^[0-9a-f]{64}$/);
 });
 
 test("id-sensitivity: changing each hashed field changes the id", () => {
