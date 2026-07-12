@@ -4,11 +4,13 @@
 // Dispatches to subcommands:
 //  - `validate <file>`: validate a claim or registry file.
 //  - `check <globs...>`: check for overlap with active claims.
+//  - `claim <globs...>`: file a claim (append to the registry).
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { validateClaim, validateRegistry } from "../src/schema.js";
 import { check } from "../src/check.js";
+import { makeClaim, parseTtl } from "../src/claim.js";
 
 const USAGE = `worklease — coordination format for fleets of AI coding agents
 
@@ -17,8 +19,13 @@ Usage:
   worklease check <globs...> [--agent <id>] [--registry <path>] [--json]
       Report whether the planned edit globs overlap any active claim held by
       another agent. Exit 0 = clear, 1 = conflict.
+  worklease claim <globs...> --intent "<why>" [--ttl <dur>] [--agent <id>]
+                             [--registry <path>] [--json]
+      File a claim for the globs and append it to the registry. Exit 0 on write.
 
 Flags:
+  --intent <str>     why you're claiming (required for \`claim\`)
+  --ttl <dur>        lease length: <n>s|m|h or bare seconds (claim; default 30m)
   --agent <id>       identify "me" (env WORKLEASE_AGENT); own claims are clear
   --registry <path>  registry file (default: env WORKLEASE_REGISTRY or
                      .worklease/registry.jsonl)
@@ -156,6 +163,99 @@ function runCheck(args) {
   process.exit(result.clear ? 0 : 1);
 }
 
+// `claim` subcommand implementation
+function parseClaimArgs(args) {
+  const globs = [];
+  let intent = null;
+  let ttl = null;
+  let agent = process.env.WORKLEASE_AGENT || null;
+  let registry = null;
+  let json = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--json") {
+      json = true;
+    } else if (a === "--intent") {
+      intent = args[++i];
+      if (intent == null) fail("error: --intent requires a value\n\n" + USAGE);
+    } else if (a === "--ttl") {
+      ttl = args[++i];
+      if (ttl == null) fail("error: --ttl requires a value\n\n" + USAGE);
+    } else if (a === "--agent") {
+      agent = args[++i];
+      if (agent == null) fail("error: --agent requires a value\n\n" + USAGE);
+    } else if (a === "--registry") {
+      registry = args[++i];
+      if (registry == null) fail("error: --registry requires a value\n\n" + USAGE);
+    } else if (a.startsWith("--")) {
+      fail(`error: unknown flag: ${a}\n\n` + USAGE);
+    } else {
+      globs.push(a);
+    }
+  }
+  return { globs, intent, ttl, agent, registry, json };
+}
+
+function runClaim(args) {
+  const { globs, intent, ttl, agent, registry, json } = parseClaimArgs(args);
+
+  if (globs.length === 0) {
+    fail("error: `claim` requires one or more globs\n\n" + USAGE);
+    return;
+  }
+  if (intent == null || intent.trim().length === 0) {
+    fail("error: `claim` requires a non-empty --intent\n\n" + USAGE);
+    return;
+  }
+  if (agent == null || agent.trim().length === 0) {
+    fail("error: `claim` requires --agent (or the WORKLEASE_AGENT env var)\n\n" + USAGE);
+    return;
+  }
+  const ttl_seconds = ttl == null ? 1800 : parseTtl(ttl);
+  if (ttl_seconds == null) {
+    fail(`error: invalid --ttl: ${ttl} (use <n>s|m|h or a positive integer of seconds)`);
+    return;
+  }
+
+  // The clock is read only here; makeClaim stays pure over the injected `created`.
+  const created = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+  const claim = makeClaim(globs, { agent, intent, ttl_seconds, created });
+
+  // Validate the finished record via #1's validator; gate the write on it so an
+  // unsupported glob (or any other defect) is rejected rather than written.
+  const result = validateClaim(claim);
+  if (!result.valid) {
+    process.stdout.write(
+      `✗ cannot file claim (${result.errors.length} error${result.errors.length === 1 ? "" : "s"}):\n`
+    );
+    for (const e of result.errors) {
+      const at = e.path === "" ? "<root>" : e.path;
+      process.stdout.write(`  ${at}: ${e.message} [${e.code}]\n`);
+    }
+    process.exit(1);
+    return;
+  }
+
+  const path = registry || defaultRegistryPath();
+  // Append-only: ensure the parent dir exists, then write one JSON line. Existing
+  // lines are never rewritten, so concurrent claims can't corrupt the file.
+  // (Registry issue #4 owns the durable store; this interim appender is minimal
+  // and isolated so #4 can replace it without touching makeClaim.)
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, JSON.stringify(claim) + "\n");
+
+  if (json) {
+    process.stdout.write(JSON.stringify(claim) + "\n");
+  } else {
+    process.stdout.write(
+      `filed ${claim.id} — ${claim.agent} holds ${claim.globs.join(", ")} — ` +
+        `"${claim.intent}" (expires ${claim.expires})\n`
+    );
+  }
+  process.exit(0);
+}
+
 // Main router
 function main(argv) {
   const args = argv.slice(2);
@@ -163,6 +263,10 @@ function main(argv) {
 
   if (command === "check") {
     runCheck(args.slice(1));
+    return;
+  }
+  if (command === "claim") {
+    runClaim(args.slice(1));
     return;
   }
   if (command === "validate") {
