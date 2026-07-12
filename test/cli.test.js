@@ -670,6 +670,29 @@ test("conformance: merges with only warnings (no collisions) → exit 0 (advisor
   assert.equal(out.violations.length, 0);
 });
 
+test("conformance: past-TTL active claim + no-`at` cross-agent merge → violation, exit 1", () => {
+  // The claim's `expires` is already in the past relative to the real clock, so
+  // `loadRegistry` would resolve it to `expired` under wall-clock TTL decay.
+  // conformance must load WITHOUT that decay and honor the stored active state:
+  // a timestamp-less merge under another agent's claim is a real collision, not
+  // a warning. (Before the fix this reported an all-clear exit 0.)
+  const reg = registry("conf-past-ttl.jsonl", [
+    { id: "1", agent: "a2", globs: ["src/auth/**"], intent: "auth", expires: EXPIRED },
+  ]);
+  const m = merges("conf-past-ttl.json", [{ agent: "a1", files: ["src/auth/login.ts"] }]);
+
+  const r = run(["conformance", reg, m]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /a1 edited src\/auth\/login\.ts under a2's claim/);
+
+  const j = run(["conformance", reg, m, "--json"]);
+  assert.equal(j.status, 1);
+  const out = JSON.parse(j.stdout);
+  assert.equal(out.violations.length, 1);
+  assert.equal(out.warnings.length, 0);
+  assert.equal(out.violations[0].conflicting_claim.agent, "a2");
+});
+
 test("conformance: merges as a JSON array and as JSONL load equivalently", () => {
   const reg = registry("conf-fmt.jsonl", [
     { id: "1", agent: "a1", globs: ["src/auth/**"] },

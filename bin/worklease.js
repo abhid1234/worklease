@@ -459,9 +459,15 @@ function runConformance(args) {
   }
 
   // Reuse the same registry loader `check` uses so the two verbs never disagree
-  // on resolution; a missing registry file resolves to an empty claim set.
-  const now = Date.now();
-  const { claims } = loadRegistry(registryPath, { now });
+  // on resolution; a missing registry file resolves to an empty claim set. But
+  // load WITHOUT wall-clock TTL expiry (`expire: false`): conformance is an
+  // after-the-fact audit that runs once short TTLs have elapsed, and it reasons
+  // about time itself via each merge's `at`. Applying `Date.now()` decay here
+  // would collapse every stored claim to `expired`, and the no-`at` status
+  // fallback would then miss real cross-agent collisions (reporting them as
+  // warnings). Resolving to the stored active/released state keeps the audit
+  // correct for timestamp-less merges.
+  const { claims } = loadRegistry(registryPath, { expire: false });
 
   let merges;
   try {

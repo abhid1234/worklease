@@ -75,7 +75,7 @@ export function listActive(claims) {
   return claims.filter((c) => c.status === "active");
 }
 
-// resolveRecords(records, { now }) → { claims, notes }
+// resolveRecords(records, { now, expire }) → { claims, notes }
 //
 // Folds an already-parsed append log (order = append order) into the current
 // claim array. Pure and total: `now` (epoch ms) is injected so expiry is
@@ -92,11 +92,14 @@ export function listActive(claims) {
 //      holder is noted (advisory ownership hint).
 //   4. Derive TTL expiry — an `active` claim whose `expires <= now` becomes
 //      effective status `expired` (derived, with a note); released claims stay
-//      released.
+//      released. Skipped when `expire` is false, so the stored claim state
+//      (active/released, no wall-clock decay) is returned — `conformance` needs
+//      this because it audits *after* short TTLs have elapsed and does its own
+//      temporal reasoning against each merge's `at`.
 //
 // Returns the claims sorted by `expires` ascending plus the collected notes.
 export function resolveRecords(records, opts = {}) {
-  const { now = Date.now() } = opts;
+  const { now = Date.now(), expire = true } = opts;
   const notes = [];
 
   // 1. Integrity filter (also drops non-objects, which can't self-hash).
@@ -147,7 +150,7 @@ export function resolveRecords(records, opts = {}) {
   }
 
   // 4. Derive TTL expiry (a claim exactly at expires === now counts as expired).
-  for (const claim of claims.values()) {
+  for (const claim of expire ? claims.values() : []) {
     if (claim.status === "active" && claim.expires != null) {
       const exp = Date.parse(claim.expires);
       if (!Number.isNaN(exp) && exp <= now) {
@@ -194,14 +197,16 @@ export function appendRecord(path, record) {
   return stored;
 }
 
-// loadRegistry(path, { now }) → { claims, notes }
+// loadRegistry(path, { now, expire }) → { claims, notes }
 //
 // Reads the JSONL file (missing file → empty registry, no throw), parses each
 // non-blank line tolerantly (a line that won't parse is dropped with a note,
 // never aborting the load), and returns the resolved current registry via
-// `resolveRecords`. Replaces #3's interim reader.
+// `resolveRecords`. `expire` (default true) forwards to `resolveRecords`; pass
+// false to skip wall-clock TTL decay and see the stored claim state. Replaces
+// #3's interim reader.
 export function loadRegistry(path, opts = {}) {
-  const { now = Date.now() } = opts;
+  const { now = Date.now(), expire = true } = opts;
 
   let raw;
   try {
@@ -223,6 +228,6 @@ export function loadRegistry(path, opts = {}) {
     }
   });
 
-  const resolved = resolveRecords(parsed, { now });
+  const resolved = resolveRecords(parsed, { now, expire });
   return { claims: resolved.claims, notes: [...parseNotes, ...resolved.notes] };
 }
