@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,20 +13,18 @@ const CLI = join(__dirname, "..", "bin", "worklease.js");
 
 // Run the CLI as a child process. Returns { status, stdout, stderr }.
 function run(args, env = {}) {
-  try {
-    const stdout = execFileSync("node", [CLI, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...env },
-    });
-    return { status: 0, stdout, stderr: "" };
-  } catch (e) {
-    return {
-      status: e.status ?? 1,
-      stdout: e.stdout?.toString() ?? "",
-      stderr: e.stderr?.toString() ?? "",
-    };
-  }
+  // spawnSync returns both stdout and stderr regardless of exit code, so warnings
+  // emitted to stderr on a 0 exit (e.g. `list --all` skip notes) stay observable.
+  const r = spawnSync("node", [CLI, ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...env },
+  });
+  return {
+    status: r.status ?? 1,
+    stdout: r.stdout ?? "",
+    stderr: r.stderr ?? "",
+  };
 }
 
 const validClaim = {
@@ -479,6 +477,45 @@ test("list default hides expired; --all shows it labeled", () => {
   const all = run(["list", "--registry", reg, "--all"]);
   assert.equal(all.status, 0);
   assert.match(all.stdout, /expired/);
+});
+
+// A dropped (corrupt/tampered/stale) line must not vanish silently: the promised
+// warning is the only mitigation, else two agents can both be told a path is clear.
+test("list --all warns to stderr about a skipped unparseable line", () => {
+  const reg = join(dir, "list-warn-all.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "this is not json\n");
+  const r = run(["list", "--registry", reg, "--all"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /warning:.*skipped/i);
+});
+
+test("list --verbose warns even without --all", () => {
+  const reg = join(dir, "list-warn-verbose.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "{ broken\n");
+  const r = run(["list", "--registry", reg, "--verbose"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /warning:.*skipped/i);
+});
+
+test("plain list stays quiet on stderr (warnings gated behind --all/--verbose)", () => {
+  const reg = join(dir, "list-warn-plain.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "not json\n");
+  const r = run(["list", "--registry", reg]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stderr, "");
+});
+
+test("check warns to stderr about a skipped line so a dropped claim is visible", () => {
+  const reg = join(dir, "check-warn.jsonl");
+  fileClaim(reg, "src/a/**", { agent: "a1" });
+  appendFileSync(reg, "garbage line\n");
+  // A different path, so the surviving claim doesn't conflict — the point is the
+  // warning fires regardless of the clear/conflict verdict.
+  const r = run(["check", "src/z/**", "--registry", reg, "--agent", "a2"]);
+  assert.match(r.stderr, /warning:.*skipped/i);
 });
 
 // --- release ---------------------------------------------------------------

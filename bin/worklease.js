@@ -30,9 +30,10 @@ Usage:
   worklease claim <globs...> --intent "<why>" [--ttl <dur>] [--agent <id>]
                              [--registry <path>] [--json]
       File a claim for the globs and append it to the registry. Exit 0 on write.
-  worklease list [--all] [--agent <id>] [--registry <path>] [--json]
+  worklease list [--all] [--verbose] [--agent <id>] [--registry <path>] [--json]
       Show active claims: who holds what, expiring when. --all also shows
-      released/expired claims labeled with their effective status.
+      released/expired claims labeled with their effective status. --all or
+      --verbose also warn (to stderr) about skipped/tampered/expired lines.
   worklease release <id> [--agent <id>] [--registry <path>] [--json]
       Drop a claim (full id or unambiguous prefix) by appending a release
       record. No-op with a note if it is already released/expired.
@@ -41,6 +42,7 @@ Flags:
   --intent <str>     why you're claiming (required for \`claim\`)
   --ttl <dur>        lease length: <n>s|m|h or bare seconds (claim; default 30m)
   --all              include released/expired claims (list)
+  --verbose          warn about skipped/tampered/expired lines to stderr (list)
   --agent <id>       identify "me" (env WORKLEASE_AGENT); own claims are clear
   --registry <path>  registry file (default: env WORKLEASE_REGISTRY or
                      .worklease/registry.jsonl)
@@ -49,6 +51,14 @@ Flags:
 function fail(message) {
   process.stderr.write(`${message}\n`);
   process.exit(1);
+}
+
+// Surface loadRegistry/resolveRecords `notes` (skipped/tampered/expired lines)
+// to stderr as warnings. A dropped line is a corrupt/stale/tampered claim, and
+// PRODUCT.md decision 3 makes the warning the mitigation: without it a dropped
+// claim silently vanishes and two agents can both be told a path is clear.
+function warnNotes(notes) {
+  for (const note of notes) process.stderr.write(`warning: ${note}\n`);
 }
 
 // `validate` subcommand implementation
@@ -133,7 +143,10 @@ function runCheck(args) {
 
   const path = registry || defaultRegistryPath();
   const now = Date.now();
-  const { claims } = loadRegistry(path, { now });
+  const { claims, notes } = loadRegistry(path, { now });
+  // Always warn: a claim dropped here means `check` may report `clear` for a
+  // path another agent actually holds — the exact collision worklease prevents.
+  warnNotes(notes);
   const result = check(globs, claims, { agent, now });
 
   if (json) {
@@ -250,6 +263,7 @@ function runClaim(args) {
 // `list` subcommand implementation
 function parseListArgs(args) {
   let all = false;
+  let verbose = false;
   let agent = null;
   let registry = null;
   let json = false;
@@ -260,6 +274,8 @@ function parseListArgs(args) {
       json = true;
     } else if (a === "--all") {
       all = true;
+    } else if (a === "--verbose") {
+      verbose = true;
     } else if (a === "--agent") {
       agent = args[++i];
       if (agent == null) fail("error: --agent requires a value\n\n" + USAGE);
@@ -272,15 +288,18 @@ function parseListArgs(args) {
       fail(`error: \`list\` takes no positional arguments (got: ${a})\n\n` + USAGE);
     }
   }
-  return { all, agent, registry, json };
+  return { all, verbose, agent, registry, json };
 }
 
 function runList(args) {
-  const { all, agent, registry, json } = parseListArgs(args);
+  const { all, verbose, agent, registry, json } = parseListArgs(args);
 
   const path = registry || defaultRegistryPath();
   const now = Date.now();
-  const { claims } = loadRegistry(path, { now });
+  const { claims, notes } = loadRegistry(path, { now });
+  // Surface skipped/tampered/expired notes to stderr under --all or --verbose,
+  // so a dropped (corrupt/stale) claim is visible rather than silently gone.
+  if (all || verbose) warnNotes(notes);
 
   let rows = all ? claims : claims.filter((c) => c.status === "active");
   if (agent != null) rows = rows.filter((c) => c.agent === agent);
