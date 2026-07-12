@@ -7,10 +7,12 @@
 //  - `claim <globs...>`: file a claim (append to the registry).
 //  - `list`: show active claims (who holds what, expiring when).
 //  - `release <id>`: drop a claim by appending a release record.
+//  - `conformance <registry> <merges>`: score whether merges respected claims.
 
 import { readFileSync } from "node:fs";
 import { validateClaim, validateRegistry } from "../src/schema.js";
 import { check } from "../src/check.js";
+import { conformance } from "../src/conformance.js";
 import { makeClaim, parseTtl } from "../src/claim.js";
 import {
   loadRegistry,
@@ -37,6 +39,11 @@ Usage:
   worklease release <id> [--agent <id>] [--registry <path>] [--json]
       Drop a claim (full id or unambiguous prefix) by appending a release
       record. No-op with a note if it is already released/expired.
+  worklease conformance <registry> <merges> [--json]
+      Score whether merged changes respected the claims. Reads the registry and
+      a merges file (each agent's touched files) and reports a coordination
+      score, respected/total, violations, and warnings. Exit 0 = no violations,
+      1 = at least one violation.
 
 Flags:
   --intent <str>     why you're claiming (required for \`claim\`)
@@ -405,6 +412,88 @@ function runRelease(args) {
   process.exit(0);
 }
 
+// `conformance` subcommand implementation
+//
+// Load a merges file: if it parses as a JSON array, use it; otherwise treat it
+// as JSONL (one merge record per non-empty line). A missing file → [] (total 0).
+// A malformed JSON array or unparseable line throws for the caller to report.
+function loadMerges(path) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return []; // missing file → no changes
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") return [];
+  if (trimmed.startsWith("[")) return JSON.parse(trimmed);
+  return raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l)
+    .map((l) => JSON.parse(l));
+}
+
+function parseConformanceArgs(args) {
+  const positional = [];
+  let json = false;
+  for (const a of args) {
+    if (a === "--json") {
+      json = true;
+    } else if (a.startsWith("--")) {
+      fail(`error: unknown flag: ${a}\n\n` + USAGE);
+    } else {
+      positional.push(a);
+    }
+  }
+  return { positional, json };
+}
+
+function runConformance(args) {
+  const { positional, json } = parseConformanceArgs(args);
+  const [registryPath, mergesPath] = positional;
+
+  if (!registryPath || !mergesPath) {
+    fail("error: `conformance` requires <registry> and <merges> file arguments\n\n" + USAGE);
+    return;
+  }
+
+  // Reuse the same registry loader `check` uses so the two verbs never disagree
+  // on resolution; a missing registry file resolves to an empty claim set.
+  const now = Date.now();
+  const { claims } = loadRegistry(registryPath, { now });
+
+  let merges;
+  try {
+    merges = loadMerges(mergesPath);
+  } catch (e) {
+    fail(`error: ${mergesPath} is not valid merges JSON: ${e.message}`);
+    return;
+  }
+
+  const result = conformance(claims, merges, {});
+
+  if (json) {
+    process.stdout.write(JSON.stringify(result) + "\n");
+  } else {
+    process.stdout.write(
+      `coordination score ${result.score.toFixed(2)} — ` +
+        `${result.respected}/${result.total} change${result.total === 1 ? "" : "s"} respected\n`
+    );
+    for (const { agent, file, conflicting_claim: c } of result.violations) {
+      process.stdout.write(
+        `  ✗ ${agent} edited ${file} under ${c.agent}'s claim — ` +
+          `"${c.intent}" (active ${c.created}–${c.expires})\n`
+      );
+    }
+    for (const { agent, file } of result.warnings) {
+      process.stdout.write(`  • ${agent} edited ${file} (unclaimed)\n`);
+    }
+  }
+
+  process.exit(result.violations.length === 0 ? 0 : 1);
+}
+
 // Main router
 function main(argv) {
   const args = argv.slice(2);
@@ -424,6 +513,10 @@ function main(argv) {
   }
   if (command === "release") {
     runRelease(args.slice(1));
+    return;
+  }
+  if (command === "conformance") {
+    runConformance(args.slice(1));
     return;
   }
   if (command === "validate") {

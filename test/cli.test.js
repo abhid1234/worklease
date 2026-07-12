@@ -612,3 +612,120 @@ test("release records who released it, noting a non-holder", () => {
   assert.equal(arr[0].status, "released");
   assert.equal(arr[0].released_by, "a2");
 });
+
+// --- conformance ------------------------------------------------------------
+
+// Write a merges fixture (defaults to JSON array). Pass a raw string to control
+// the encoding (e.g. JSONL or malformed JSON).
+function merges(name, data) {
+  return fixture(name, data);
+}
+
+test("conformance: clean merges (all respected) → readable summary, exit 0; --json empty violations", () => {
+  const reg = registry("conf-clean.jsonl", [
+    { id: "1", agent: "a1", globs: ["src/auth/**"] },
+  ]);
+  const m = merges("conf-clean.json", [{ agent: "a1", files: ["src/auth/login.ts"] }]);
+
+  const r = run(["conformance", reg, m]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /coordination score 1\.00/);
+  assert.match(r.stdout, /1\/1 change respected/);
+
+  const j = run(["conformance", reg, m, "--json"]);
+  assert.equal(j.status, 0);
+  const out = JSON.parse(j.stdout);
+  assert.equal(out.score, 1);
+  assert.deepEqual(out.violations, []);
+});
+
+test("conformance: merges with a violation → exit 1; --json lists full conflicting_claim", () => {
+  const reg = registry("conf-viol.jsonl", [
+    { id: "1", agent: "a2", globs: ["src/auth/**"], intent: "auth" },
+  ]);
+  const m = merges("conf-viol.json", [{ agent: "a1", files: ["src/auth/login.ts"] }]);
+
+  const r = run(["conformance", reg, m]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /a1 edited src\/auth\/login\.ts under a2's claim/);
+
+  const j = run(["conformance", reg, m, "--json"]);
+  assert.equal(j.status, 1);
+  const out = JSON.parse(j.stdout);
+  assert.equal(out.violations.length, 1);
+  assert.equal(out.violations[0].conflicting_claim.agent, "a2");
+  assert.deepEqual(out.violations[0].conflicting_claim.globs, ["src/auth/**"]);
+});
+
+test("conformance: merges with only warnings (no collisions) → exit 0 (advisory), low score", () => {
+  const reg = registry("conf-warn.jsonl", [
+    { id: "1", agent: "a1", globs: ["src/auth/**"] },
+  ]);
+  const m = merges("conf-warn.json", [{ agent: "a1", files: ["docs/README.md"] }]);
+  const r = run(["conformance", reg, m, "--json"]);
+  assert.equal(r.status, 0);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.score, 0);
+  assert.equal(out.warnings.length, 1);
+  assert.equal(out.violations.length, 0);
+});
+
+test("conformance: merges as a JSON array and as JSONL load equivalently", () => {
+  const reg = registry("conf-fmt.jsonl", [
+    { id: "1", agent: "a1", globs: ["src/auth/**"] },
+  ]);
+  const rec = { agent: "a1", files: ["src/auth/login.ts"] };
+  const asArray = merges("conf-array.json", [rec]);
+  const asJsonl = merges("conf-jsonl.json", JSON.stringify(rec) + "\n");
+
+  const a = JSON.parse(run(["conformance", reg, asArray, "--json"]).stdout);
+  const b = JSON.parse(run(["conformance", reg, asJsonl, "--json"]).stdout);
+  assert.deepEqual(a, b);
+});
+
+test("conformance: missing registry file → empty registry (all warnings), exit 0", () => {
+  const m = merges("conf-noreg.json", [{ agent: "a1", files: ["src/auth/login.ts"] }]);
+  const r = run(["conformance", join(dir, "no-registry.jsonl"), m, "--json"]);
+  assert.equal(r.status, 0);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.score, 0);
+  assert.equal(out.warnings.length, 1);
+});
+
+test("conformance: missing merges file → total 0, score 1, exit 0", () => {
+  const reg = registry("conf-nomerges.jsonl", [
+    { id: "1", agent: "a1", globs: ["src/auth/**"] },
+  ]);
+  const r = run(["conformance", reg, join(dir, "no-merges.json"), "--json"]);
+  assert.equal(r.status, 0);
+  assert.deepEqual(JSON.parse(r.stdout), {
+    score: 1,
+    total: 0,
+    respected: 0,
+    violations: [],
+    warnings: [],
+  });
+});
+
+test("conformance: malformed merges JSON → clear error, exit 1", () => {
+  const reg = registry("conf-bad.jsonl", []);
+  const m = merges("conf-bad.json", "[ { not valid ");
+  const r = run(["conformance", reg, m]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /not valid merges JSON/);
+});
+
+test("conformance: missing positional arg → usage, exit 1", () => {
+  const reg = registry("conf-missing.jsonl", []);
+  const r = run(["conformance", reg]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /requires <registry> and <merges>/);
+});
+
+test("conformance: unknown flag → usage, exit 1", () => {
+  const reg = registry("conf-flag.jsonl", []);
+  const m = merges("conf-flag.json", []);
+  const r = run(["conformance", reg, m, "--bogus"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /unknown flag/);
+});
