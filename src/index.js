@@ -1,6 +1,15 @@
 // worklease — public entry point (package `main`).
+// Re-exports the pure schema/validator API.
 // Re-exports the pure `check` / glob-overlap API.
-// (Schema/validator exports from #1 are unioned in here when that lands.)
 
+export {
+  validateClaim,
+  validateRegistry,
+  isIso8601Utc,
+  isAllowedGlob,
+  STATUSES,
+  CLAIM_FIELDS,
+  ERROR_CODES,
+} from "./schema.js";
 export { globsOverlap } from "./glob.js";
 export { check } from "./check.js";

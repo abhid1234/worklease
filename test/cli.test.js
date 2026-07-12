@@ -27,6 +27,17 @@ function run(args, env = {}) {
   }
 }
 
+const validClaim = {
+  id: "abc123",
+  agent: "agent-A",
+  globs: ["src/auth/**"],
+  intent: "add OAuth",
+  ttl_seconds: 1800,
+  created: "2026-07-11T12:00:00Z",
+  expires: "2026-07-11T12:30:00Z",
+  status: "active",
+};
+
 // Far-future expiry so these claims are always "active" against the real clock.
 const ACTIVE = "2099-01-01T00:00:00Z";
 const EXPIRED = "2000-01-01T00:00:00Z";
@@ -50,12 +61,81 @@ test.after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+function fixture(name, data) {
+  const p = join(dir, name);
+  writeFileSync(p, typeof data === "string" ? data : JSON.stringify(data));
+  return p;
+}
+
 // Write a JSONL registry fixture, one record per line.
 function registry(name, records) {
   const p = join(dir, name);
   writeFileSync(p, records.map((r) => JSON.stringify(record(r))).join("\n") + "\n");
   return p;
 }
+
+test("valid claim file → exit 0, ok message", () => {
+  const p = fixture("valid-claim.json", validClaim);
+  const r = run(["validate", p]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /valid claim/);
+});
+
+test("invalid claim file → errors printed, exit 1", () => {
+  const p = fixture("invalid-claim.json", { ...validClaim, status: "done" });
+  const r = run(["validate", p]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /INVALID_ENUM/);
+});
+
+test("valid registry (array) file → exit 0", () => {
+  const p = fixture("valid-registry.json", [validClaim, { ...validClaim, id: "other" }]);
+  const r = run(["validate", p]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /valid registry/);
+});
+
+test("invalid registry file → exit 1", () => {
+  const p = fixture("dup-registry.json", [validClaim, validClaim]);
+  const r = run(["validate", p]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /DUPLICATE_ID/);
+});
+
+test("--json emits parseable { valid, errors }", () => {
+  const p = fixture("valid-claim-json.json", validClaim);
+  const r = run(["validate", p, "--json"]);
+  assert.equal(r.status, 0);
+  const parsed = JSON.parse(r.stdout);
+  assert.deepEqual(parsed, { valid: true, errors: [] });
+
+  const p2 = fixture("invalid-claim-json.json", { ...validClaim, ttl_seconds: -1 });
+  const r2 = run(["validate", p2, "--json"]);
+  assert.equal(r2.status, 1);
+  const parsed2 = JSON.parse(r2.stdout);
+  assert.equal(parsed2.valid, false);
+  assert.ok(parsed2.errors.some((e) => e.code === "NOT_POSITIVE_INT"));
+});
+
+test("missing file → clear error, exit 1", () => {
+  const r = run(["validate", join(dir, "does-not-exist.json")]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /cannot read file/);
+});
+
+test("malformed JSON → clear parse error, exit 1", () => {
+  const p = fixture("bad.json", "{ not valid json ");
+  const r = run(["validate", p]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /not valid JSON/);
+});
+
+test("auto-detection routes object→claim, array→registry", () => {
+  const objP = fixture("obj.json", validClaim);
+  assert.match(run(["validate", objP]).stdout, /claim/);
+  const arrP = fixture("arr.json", [validClaim]);
+  assert.match(run(["validate", arrP]).stdout, /registry/);
+});
 
 test("clear check → readable output, exit 0", () => {
   const reg = registry("clear.jsonl", [
@@ -163,4 +243,10 @@ test("unknown subcommand → usage, exit 1", () => {
   const r = run(["frobnicate"]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /Usage/);
+});
+
+test("validate without a file → error, exit 1", () => {
+  const r = run(["validate"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /requires a file/);
 });

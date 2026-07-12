@@ -1,24 +1,19 @@
 #!/usr/bin/env node
-// worklease CLI — `check` verb: does my planned edit overlap any active claim
-// held by another agent?
+// worklease CLI.
 //
-//   worklease check <globs...> [--agent <id>] [--registry <path>] [--json]
-//
-// Loads the registry file, resolves it to the current claim array, runs the
-// pure `check` core, prints a readable summary (or `--json`), and exits 0 when
-// clear / 1 when any conflict is found. The non-zero exit is an advisory signal
-// a pre-edit hook can gate on — not a hard lock.
-//
-// (Registry issue #4 owns the real loader + default path; until it lands this
-// uses a small local reader isolated in `loadRegistry` so it can be swapped in.)
+// Dispatches to subcommands:
+//  - `validate <file>`: validate a claim or registry file.
+//  - `check <globs...>`: check for overlap with active claims.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { validateClaim, validateRegistry } from "../src/schema.js";
 import { check } from "../src/check.js";
 
 const USAGE = `worklease — coordination format for fleets of AI coding agents
 
 Usage:
+  worklease validate <file> [--json]   Validate a claim or registry JSON file
   worklease check <globs...> [--agent <id>] [--registry <path>] [--json]
       Report whether the planned edit globs overlap any active claim held by
       another agent. Exit 0 = clear, 1 = conflict.
@@ -27,24 +22,66 @@ Flags:
   --agent <id>       identify "me" (env WORKLEASE_AGENT); own claims are clear
   --registry <path>  registry file (default: env WORKLEASE_REGISTRY or
                      .worklease/registry.jsonl)
-  --json             emit { clear, conflicts } for harness consumption`;
+  --json             emit machine-readable output for the active command`;
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
   process.exit(1);
 }
 
-// Default registry path — mirrors #4's `defaultRegistryPath`: WORKLEASE_REGISTRY
-// if set, else `.worklease/registry.jsonl` under the cwd.
+// `validate` subcommand implementation
+function runValidate(args) {
+  const json = args.includes("--json");
+  const file = args.find((a) => a !== "--json");
+
+  if (!file) {
+    fail("error: `validate` requires a file argument\n\n" + USAGE);
+    return;
+  }
+
+  let raw;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    fail(`error: cannot read file: ${file}`);
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    fail(`error: ${file} is not valid JSON: ${e.message}`);
+    return;
+  }
+
+  const isArray = Array.isArray(parsed);
+  const result = isArray ? validateRegistry(parsed) : validateClaim(parsed);
+  const kind = isArray ? "registry" : "claim";
+
+  if (json) {
+    process.stdout.write(JSON.stringify(result) + "\n");
+  } else if (result.valid) {
+    process.stdout.write(`✓ ${file}: valid ${kind}\n`);
+  } else {
+    process.stdout.write(`✗ ${file}: invalid ${kind} (${result.errors.length} error${result.errors.length === 1 ? "" : "s"})\n`);
+    for (const e of result.errors) {
+      const at = e.path === "" ? "<root>" : e.path;
+      process.stdout.write(`  ${at}: ${e.message} [${e.code}]\n`);
+    }
+  }
+
+  process.exit(result.valid ? 0 : 1);
+}
+
+
+// `check` subcommand implementation
 function defaultRegistryPath() {
   return (
     process.env.WORKLEASE_REGISTRY || join(process.cwd(), ".worklease", "registry.jsonl")
   );
 }
 
-// Interim JSONL reader (swappable for #4's loader): read the file, JSON.parse
-// each non-empty line, keep the latest record per `id`, and treat a missing
-// file as an empty registry.
 function loadRegistry(path) {
   let raw;
   try {
@@ -62,8 +99,6 @@ function loadRegistry(path) {
   return [...latest.values()];
 }
 
-// Minimal flag parser for the `check` verb: collects positional globs and the
-// three known flags; an unknown `--flag` is an error.
 function parseCheckArgs(args) {
   const globs = [];
   let agent = process.env.WORKLEASE_AGENT || null;
@@ -121,12 +156,17 @@ function runCheck(args) {
   process.exit(result.clear ? 0 : 1);
 }
 
+// Main router
 function main(argv) {
   const args = argv.slice(2);
   const command = args[0];
 
   if (command === "check") {
     runCheck(args.slice(1));
+    return;
+  }
+  if (command === "validate") {
+    runValidate(args.slice(1));
     return;
   }
 
