@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>worklease — watch two agents avoid a collision</title>
+<meta name="description" content="worklease: the open coordination format for fleets of AI coding agents. Watch two parallel agents avoid a collision — running the real library in your browser.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%A7%89%3C/text%3E%3C/svg%3E">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#17130e; --bg2:#1e1811; --panel:#221b13; --line:#3a2f22;
+    --ink:#f0e9de; --ink2:#a89d8c; --faint:#6f6353;
+    --amber:#ff9e2c; --orange:#ff7a1a; --A:#4ea1ff; --B:#34d399; --red:#ff5c5c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 700px at 50% -10%,#241c12,var(--bg) 60%);color:var(--ink);
+    font-family:"Archivo",system-ui,sans-serif;min-height:100vh;}
+  .mono{font-family:"IBM Plex Mono",monospace;}
+  .wrap{max-width:1080px;margin:0 auto;padding:44px 24px 90px}
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+  .mk{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--amber),var(--orange));display:flex;align-items:center;justify-content:center;color:#17130e;font-weight:800;font-size:24px;}
+  h1{font-size:27px;font-weight:800;letter-spacing:-.5px;margin:0;}
+  .tag{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--faint);letter-spacing:2px;text-transform:uppercase;}
+  .top-links{margin-left:auto;display:flex;gap:16px;font-family:"IBM Plex Mono",monospace;font-size:13px;}
+  .top-links a{color:var(--amber);text-decoration:none;}
+  .lead{color:var(--ink2);font-size:18px;line-height:1.55;margin:22px 0 8px;max-width:780px;}
+  .lead b{color:var(--amber);}
+
+  .toggle{display:flex;align-items:center;gap:14px;margin:24px 0 8px;flex-wrap:wrap;}
+  .switch{position:relative;width:88px;height:40px;border-radius:22px;border:1px solid var(--line);background:#2a2117;cursor:pointer;transition:.2s;flex:0 0 auto;}
+  .switch.on{background:linear-gradient(135deg,var(--amber),var(--orange));border-color:transparent;}
+  .knob{position:absolute;top:3px;left:3px;width:32px;height:32px;border-radius:50%;background:#f0e9de;transition:.2s;}
+  .switch.on .knob{left:51px;}
+  .tlabel{font-weight:700;font-size:17px;} .tlabel .s{color:var(--faint);}
+  .btn{font-family:"Archivo";font-weight:700;font-size:17px;background:linear-gradient(135deg,var(--amber),var(--orange));color:#17130e;border:none;border-radius:11px;padding:13px 24px;cursor:pointer;margin-left:auto;}
+  .btn:disabled{opacity:.5;cursor:default;} .btn:active:not(:disabled){transform:translateY(1px)}
+
+  .board{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:26px;}
+  @media(max-width:720px){.board{grid-template-columns:1fr}}
+  .agent{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;}
+  .agent .name{font-weight:800;font-size:19px;display:flex;align-items:center;gap:10px;}
+  .agent .dot{width:12px;height:12px;border-radius:50%;}
+  .agent.A .dot{background:var(--A);} .agent.B .dot{background:var(--B);}
+  .agent .task{color:var(--ink2);font-size:15px;margin:8px 0 14px;}
+  .files{display:flex;flex-wrap:wrap;gap:8px;}
+  .file{font-family:"IBM Plex Mono",monospace;font-size:14px;padding:7px 12px;border-radius:8px;border:1px solid var(--line);background:#2a2117;color:#d8cdb9;transition:.25s;}
+  .file.hot{border-color:var(--amber);color:var(--amber);}
+  .file.claimedA{border-color:var(--A);color:var(--A);box-shadow:0 0 0 1px var(--A) inset;}
+  .file.collide{border-color:var(--red);color:var(--red);background:#2a1414;box-shadow:0 0 20px -6px var(--red);}
+  .file.dropped{opacity:.35;text-decoration:line-through;}
+  .agent .say{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--faint);margin-top:14px;min-height:34px;line-height:1.5;}
+  .agent .say b{color:var(--ink);}
+
+  .registry{background:#120f0a;border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-top:18px;}
+  .registry .h{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--faint);margin-bottom:10px;}
+  .registry pre{margin:0;font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.7;color:#c9bfa8;white-space:pre-wrap;word-break:break-word;}
+  .registry .empty{color:var(--faint);}
+
+  .verdict{margin-top:22px;border-radius:14px;padding:22px 26px;font-weight:800;font-size:24px;display:none;align-items:center;gap:16px;border:1px solid;}
+  .verdict .lab{font-family:"IBM Plex Mono",monospace;font-size:13px;letter-spacing:2px;font-weight:600;display:block;margin-top:4px;opacity:.85;}
+  .verdict.collide{display:flex;color:var(--red);border-color:var(--red);background:#241010;}
+  .verdict.averted{display:flex;color:var(--amber);border-color:var(--amber);background:#241a0c;}
+  .foot{color:var(--faint);font-family:"IBM Plex Mono",monospace;font-size:13px;margin-top:34px;line-height:1.8;}
+  .foot a{color:var(--amber);text-decoration:none;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="mk">⧉</div>
+    <div><h1>worklease</h1><div class="tag">live · the real library, in your browser</div></div>
+    <div class="top-links"><a href="https://github.com/abhid1234/worklease">github</a><a href="https://www.npmjs.com/package/@avee1234/worklease">npm</a></div>
+  </header>
+  <p class="lead">Two agents work the same repo in parallel. Both want to touch the hotspot file <b>config.js</b>. Flip worklease <b>off</b> and watch them collide; flip it <b>on</b> and watch agent B's <span class="mono">check()</span> see agent A's live claim — and pick different work.</p>
+
+  <div class="toggle">
+    <div class="switch on" id="sw" role="switch" aria-checked="true"><div class="knob"></div></div>
+    <div class="tlabel" id="swlab">worklease <span class="s">ON</span></div>
+    <button class="btn" id="run">▶ run the fleet</button>
+  </div>
+
+  <div class="board">
+    <div class="agent A"><div class="name"><span class="dot"></span> agent-A</div><div class="task">task: add OAuth login</div><div class="files" id="fA"></div><div class="say" id="sayA"></div></div>
+    <div class="agent B"><div class="name"><span class="dot"></span> agent-B</div><div class="task">task: add API rate limiting</div><div class="files" id="fB"></div><div class="say" id="sayB"></div></div>
+  </div>
+
+  <div class="registry">
+    <div class="h">shared registry · .worklease/registry.jsonl <span id="regmeta" class="mono" style="color:var(--faint)"></span></div>
+    <pre id="reg" class="empty">— empty — no claims filed —</pre>
+  </div>
+
+  <div class="verdict" id="verdict"></div>
+
+  <div class="foot">
+    Real <span class="mono">check() · conformance()</span> from <span class="mono">@avee1234/worklease</span>, running client-side · zero dependencies · MIT<br>
+    <a href="https://github.com/abhid1234/worklease">github.com/abhid1234/worklease</a> &nbsp;·&nbsp; <span class="mono">npm i @avee1234/worklease</span>
+  </div>
+</div>
+
+<script type="module">
+import { check } from './lib/check.js';
+import { conformance } from './lib/conformance.js';
+
+const $ = id => document.getElementById(id);
+
+// ---- build claim records in the real shape (makeClaim's id uses node:crypto,
+//      so in the browser we construct the same record + a display id). check()
+//      and conformance() below are the REAL, unmodified library functions. ----
+const CREATED = '2026-07-12T10:00:00.000Z';
+const NOW = Date.parse(CREATED) + 60_000;           // 1 min into the leases
+function h(s){let x=2166136261;for(let i=0;i<s.length;i++){x^=s.charCodeAt(i);x=Math.imul(x,16777619)}return (x>>>0).toString(16).padStart(8,'0')}
+function mkClaim(globs, {agent, intent, ttlSec}){
+  const expires = new Date(Date.parse(CREATED)+ttlSec*1000).toISOString();
+  const rec = { agent, globs, intent, ttl_seconds: ttlSec, created: CREATED, expires, status: 'active' };
+  return { id: 'wl_'+h(agent+globs.join()+intent), ...rec };
+}
+const jsonl = recs => recs.map(r => JSON.stringify(r)).join('\n');
+
+let ON = true;
+const sw = $('sw');
+sw.addEventListener('click', () => { ON = !ON; sw.classList.toggle('on', ON); sw.setAttribute('aria-checked', ON);
+  $('swlab').innerHTML = `worklease <span class="s">${ON?'ON':'OFF'}</span>`; reset(); });
+
+const A_FILES = ['src/auth/**', 'config.js'];
+const B_WANT  = ['src/api/**', 'config.js'];
+const B_ALT   = ['src/api/**'];
+
+function chips(el, files, cls={}) {
+  el.innerHTML = files.map(f => {
+    let c = 'file' + (f==='config.js' ? ' hot' : '');
+    if (cls[f]) c += ' ' + cls[f];
+    return `<span class="${c}">${f}</span>`;
+  }).join('');
+}
+function reset() {
+  chips($('fA'), A_FILES); chips($('fB'), B_WANT);
+  $('sayA').innerHTML=''; $('sayB').innerHTML='';
+  $('reg').className='empty'; $('reg').textContent='— empty — no claims filed —'; $('regmeta').textContent='';
+  $('verdict').className='verdict';
+}
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+async function run() {
+  reset();
+  $('run').disabled = true;
+  const registry = [];
+
+  await wait(350);
+  if (ON) {
+    const claimA = mkClaim(A_FILES, { agent:'agent-A', intent:'add OAuth', ttlSec:1200 });
+    registry.push(claimA);
+    $('reg').className=''; $('reg').textContent = jsonl(registry); $('regmeta').textContent = '· 1 active claim';
+    $('sayA').innerHTML = `<b>claim</b> src/auth/** , config.js — "add OAuth"`;
+    chips($('fA'), A_FILES, {'config.js':'claimedA','src/auth/**':'claimedA'});
+  } else {
+    $('sayA').innerHTML = `starts editing — <b>no claim filed</b>`;
+  }
+
+  await wait(750);
+  if (ON) {
+    const res = check(B_WANT, registry, { agent:'agent-B', now: NOW });   // <-- real library
+    if (!res.clear) {
+      const c = res.conflicts.find(x => x.claim.agent !== 'agent-B');
+      $('sayB').innerHTML = `<b>check</b> → <span style="color:var(--red)">conflict</span>: agent-A holds ${c.overlapping_globs.join(', ')}. steering clear →`;
+      await wait(850);
+      chips($('fB'), B_WANT, {'config.js':'dropped'});
+      await wait(500);
+      $('sayB').innerHTML = `picks different work → <b>src/api/**</b> only. no collision.`;
+      chips($('fB'), B_ALT);
+      const claimB = mkClaim(B_ALT, { agent:'agent-B', intent:'rate limiting', ttlSec:1200 });
+      registry.push(claimB);
+      $('reg').textContent = jsonl(registry); $('regmeta').textContent = '· 2 active claims';
+      const score = conformance(registry, [                              // <-- real library
+        { agent:'agent-A', files:['src/auth/login.ts','config.js'] },
+        { agent:'agent-B', files:['src/api/limit.ts'] },
+      ], { now: NOW });
+      $('verdict').className='verdict averted';
+      $('verdict').innerHTML = `⧉ collision averted<span class="lab">worklease coordination score ${Math.round(score.score*100)}% · ${score.violations.length} collisions</span>`;
+    }
+  } else {
+    $('sayB').innerHTML = `starts editing — <b>no check</b>`;
+    await wait(650);
+    chips($('fA'), A_FILES, {'config.js':'collide'});
+    chips($('fB'), B_WANT, {'config.js':'collide'});
+    $('sayA').innerHTML = `edited <b>config.js</b>`; $('sayB').innerHTML = `also edited <b>config.js</b> — 💥`;
+    $('verdict').className='verdict collide';
+    $('verdict').innerHTML = `💥 collision on config.js<span class="lab">merge conflict + duplicated work · nothing warned them</span>`;
+  }
+  $('run').disabled = false;
+}
+$('run').addEventListener('click', run);
+reset();
+</script>
+</body>
+</html>
