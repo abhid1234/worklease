@@ -4,7 +4,7 @@
 
 > Working name — see [`vision.md`](vision.md). Grounded in the mid-2026 state of parallel agent coding.
 
-Git worktrees are now the default for running many coding agents at once (Claude Code, Codex, Cursor) — but they only isolate the *filesystem*. Nothing warns you when two agents are about to edit the same code, so parallel runs still produce merge conflicts, duplicated features, and logic that compiles but disagrees at runtime. worklease is the missing coordination layer: a format for *intent*, not another orchestrator.
+Git worktrees are now the default for running many coding agents at once (Claude Code, Codex, Cursor, Google Antigravity) — but they only isolate the *filesystem*. Nothing warns you when two agents are about to edit the same code, so parallel runs still produce merge conflicts, duplicated features, and logic that compiles but disagrees at runtime. worklease is the missing coordination layer: a format for *intent*, not another orchestrator.
 
 ```bash
 worklease claim "src/auth/**" --intent "add OAuth" --ttl 20m   # I'm taking this
@@ -15,7 +15,7 @@ worklease conformance registry.jsonl merges.json               # did the fleet a
 worklease hook install                                         # auto-check staged files before every commit
 ```
 
-**Why it's different:** advisory, not a hard lock — it *warns and coordinates* so agents can pick different work. The registry is append-only JSONL with content-hash IDs, so it never merge-conflicts with itself even when many agents write at once. Harness-neutral: Claude Code, Codex, Cursor, or a factory worker.
+**Why it's different:** advisory, not a hard lock — it *warns and coordinates* so agents can pick different work. The registry is append-only JSONL with content-hash IDs, so it never merge-conflicts with itself even when many agents write at once. Harness-neutral: Claude Code, Codex, Cursor, Google Antigravity, or a factory worker.
 
 Same open-format-and-conformance playbook as [opentrajectory](https://github.com/abhid1234/opentrajectory) and [constraintguard](https://github.com/abhid1234/constraintguard) — the coordination standard for the one thing a fleet can't currently share: *what it's about to touch.*
 
