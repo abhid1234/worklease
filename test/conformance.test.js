@@ -127,9 +127,12 @@ test("temporal: a release ends the claim's window before expires", () => {
   const atBoundary = [{ agent: "A", files: ["src/auth/login.ts"], at: RELEASED }];
   assert.equal(conformance([ownReleased], atBoundary).respected, 0);
 
-  // Malformed released_at is ignored: the [created, expires) window still applies.
+  // Malformed released_at: a release we cannot place is conservatively not held,
+  // so no false coverage (never invent coverage from an unparseable timestamp).
   const badRelease = claim({ status: "released", released_at: "not-a-date" });
-  assert.equal(conformance([badRelease], ownMerge).respected, 1);
+  const badInside = [{ agent: "A", files: ["src/auth/login.ts"], at: INSIDE }];
+  assert.equal(conformance([badRelease], badInside).respected, 0);
+  assert.equal(conformance([badRelease], badInside).warnings.length, 1);
 });
 
 test("status fallback (no at): coverage uses non-expired own claim", () => {
