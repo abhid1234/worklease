@@ -46,15 +46,16 @@ const END = "# <<< worklease <<<";
 // the commit as clear, since an advisory hook must never wedge a commit.
 export function stagedPaths(opts = {}) {
   const { cwd = process.cwd() } = opts;
-  const r = spawnSync("git", ["diff", "--cached", "--name-only"], {
+  // `-z` gives NUL-terminated, UNQUOTED paths. Without it, git quotes unusual
+  // names and a filename may legally contain a newline — either of which would
+  // split/mangle a path and let a staged file slip past its claim. Split on NUL
+  // and do NOT trim (leading/trailing spaces are valid path characters).
+  const r = spawnSync("git", ["diff", "--cached", "--name-only", "-z"], {
     cwd,
     encoding: "utf8",
   });
   if (r.status !== 0 || typeof r.stdout !== "string") return [];
-  return r.stdout
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
+  return r.stdout.split("\0").filter((p) => p.length > 0);
 }
 
 // checkStagedPaths(paths, { registry, agent, now }) → { clear, conflicts, notes }
@@ -145,15 +146,25 @@ export function installHook(opts = {}) {
     action = "created";
   } else {
     const existing = readFileSync(path, "utf8");
+    const startCount = existing.split(START).length - 1;
+    const endCount = existing.split(END).length - 1;
     const s = existing.indexOf(START);
     const e = existing.indexOf(END);
-    if (s !== -1 && e !== -1 && e > s) {
-      content = existing.slice(0, s) + block + existing.slice(e + END.length);
-      action = "updated";
-    } else {
+    if (startCount === 0 && endCount === 0) {
       const sep = existing.endsWith("\n") ? "" : "\n";
       content = `${existing}${sep}\n${block}\n`;
       action = "appended";
+    } else if (startCount === 1 && endCount === 1 && e > s) {
+      content = existing.slice(0, s) + block + existing.slice(e + END.length);
+      action = "updated";
+    } else {
+      // Unbalanced or duplicated markers = a malformed managed region. Appending
+      // would let the next install pair a stale marker with a fresh one and
+      // delete the user's content between them. Fail safely and ask for a repair.
+      throw new Error(
+        "pre-commit hook has a malformed worklease managed region (unbalanced or duplicate markers); " +
+          "remove the lines between and including the worklease markers, then re-run `worklease hook install`."
+      );
     }
   }
 

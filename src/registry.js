@@ -13,6 +13,14 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { validateClaim, isIso8601Utc } from "./schema.js";
+
+// A release record's strict shape: it must name the claim it ends, who released
+// it, and when (ISO-8601 UTC). Enforced before a release can mutate claim state.
+function isValidRelease(r) {
+  const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
+  return nonEmpty(r.claim_id) && nonEmpty(r.agent) && isIso8601Utc(r.at);
+}
 
 // --- pure core -------------------------------------------------------------
 
@@ -124,8 +132,26 @@ export function resolveRecords(records, opts = {}) {
   for (const r of valid) {
     const type = r.type == null ? "claim" : r.type;
     if (type === "claim") {
+      // A hash-valid record can still be structurally malformed. Validate its
+      // claim shape here, BEFORE it can reach check/conformance — a claim
+      // missing `globs`, for instance, would otherwise crash the glob matcher.
+      const shape = "type" in r ? (({ type: _t, ...rest }) => rest)(r) : r;
+      // Reject STRUCTURAL problems (missing/wrong-typed globs, bad agent/status,
+      // non-ISO timestamps) that would crash or mislead check/conformance. The
+      // `expires === created + ttl` cross-check (EXPIRES_MISMATCH) is a
+      // creation-time invariant, not a structural one — resolveRecords derives
+      // expiry from `expires` itself — so it is not fatal here.
+      const fatal = validateClaim(shape).errors.filter((e) => e.code !== "EXPIRES_MISMATCH");
+      if (fatal.length) {
+        notes.push(`skipped claim ${shortId(r.id)}: ${fatal[0].code} at ${fatal[0].path || "(root)"}`);
+        continue;
+      }
       claims.set(r.id, { ...r });
     } else if (type === "release") {
+      if (!isValidRelease(r)) {
+        notes.push(`skipped release ${shortId(r.id)}: missing/invalid claim_id, agent, or at`);
+        continue;
+      }
       releases.push(r);
     } else {
       notes.push(`skipped record ${shortId(r.id)}: unknown type "${r.type}"`);
@@ -191,7 +217,16 @@ export function defaultRegistryPath(cwd = process.cwd()) {
 // never rewritten — this is the whole safety story. Used by `release` here and by
 // `claim` (#2).
 export function appendRecord(path, record) {
-  const stored = record.id ? record : { ...record, id: computeRecordId(record) };
+  // The id MUST be the content hash, or loadRegistry will discard the line as
+  // tampered. Recompute it; reject a caller-supplied id that disagrees rather
+  // than silently appending a record that can never be read back.
+  const id = computeRecordId(record);
+  if (record.id != null && record.id !== id) {
+    throw new Error(
+      `appendRecord: supplied id ${shortId(record.id)} does not match content hash ${shortId(id)}`
+    );
+  }
+  const stored = { ...record, id };
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, JSON.stringify(stored) + "\n");
   return stored;

@@ -1,6 +1,6 @@
 {
   "name": "@avee1234/worklease",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "The open coordination format for fleets of AI coding agents. Agents declare intent to edit file globs before they start, so parallel agents don't duplicate work or collide on hotspot files. Zero dependencies, harness-neutral, git-backed.",
   "type": "module",
   "main": "src/index.js",

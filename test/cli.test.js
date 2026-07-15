@@ -50,6 +50,8 @@ function record(o) {
     agent: o.agent,
     globs: o.globs,
     intent: o.intent ?? "work",
+    ttl_seconds: o.ttl_seconds ?? 1200,
+    created: o.created ?? "2026-01-01T00:00:00Z",
     expires: o.expires ?? ACTIVE,
     status: o.status ?? "active",
   };

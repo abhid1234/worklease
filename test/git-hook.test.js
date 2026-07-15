@@ -27,13 +27,16 @@ const SAMPLE = join(__dirname, "..", "examples", "pre-commit.sample");
 
 const ACTIVE = "2099-01-01T00:00:00Z";
 
-// A self-consistent claim record (its `id` is its own content hash), so it
-// survives loadRegistry's integrity filter.
+// A self-consistent, schema-complete claim record (its `id` is its own content
+// hash), so it survives loadRegistry's integrity filter AND its record-shape
+// validation (a claim needs every CLAIM_FIELD, including created + ttl_seconds).
 function record(o) {
   const r = {
     agent: o.agent,
     globs: o.globs,
     intent: o.intent ?? "work",
+    ttl_seconds: o.ttl_seconds ?? 1200,
+    created: o.created ?? "2026-01-01T00:00:00Z",
     expires: o.expires ?? ACTIVE,
     status: o.status ?? "active",
   };

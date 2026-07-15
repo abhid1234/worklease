@@ -101,10 +101,14 @@ test("at-window boundaries: created is active, expires is not", () => {
   assert.equal(res.violations.length, 0);
 });
 
-test("status fallback (no at): coverage uses non-expired own claim", () => {
+test("status fallback (no at): coverage requires an active own claim", () => {
   const merges = [{ agent: "A", files: ["src/auth/login.ts"] }]; // no `at`
   assert.equal(conformance([claim({ status: "active" })], merges).respected, 1);
-  assert.equal(conformance([claim({ status: "released" })], merges).respected, 1);
+  // A released claim is no longer held, so it must NOT count as coverage — the
+  // edit is an unclaimed-file warning, not a respected change.
+  const released = conformance([claim({ status: "released" })], merges);
+  assert.equal(released.respected, 0);
+  assert.equal(released.warnings.length, 1);
   assert.equal(conformance([claim({ status: "expired" })], merges).respected, 0);
 });
 

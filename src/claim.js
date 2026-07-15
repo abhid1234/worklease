@@ -44,27 +44,39 @@ export function makeClaim(globs, meta = {}) {
 // non-integer, zero, a negative, or empty input returns null (never throws) so
 // the caller can print one clear error and exit.
 export function parseTtl(input) {
+  // Guard against values that survive `> 0` but overflow later date math: a huge
+  // digit string parses to a non-safe integer (or Infinity), which would make
+  // `expires` an out-of-range Date. Require a SAFE integer everywhere.
   if (typeof input === "number") {
-    return Number.isInteger(input) && input > 0 ? input : null;
+    return Number.isSafeInteger(input) && input > 0 ? input : null;
   }
   if (typeof input !== "string") return null;
 
   const s = input.trim();
   if (/^\d+$/.test(s)) {
     const n = Number(s);
-    return n > 0 ? n : null; // bare seconds; "0" → null
+    return Number.isSafeInteger(n) && n > 0 ? n : null; // bare seconds; "0" → null
   }
 
   const m = /^(\d+)(s|m|h)$/.exec(s);
   if (!m) return null;
   const n = Number(m[1]);
-  if (n <= 0) return null; // "0m" → null
+  if (!Number.isSafeInteger(n) || n <= 0) return null; // "0m" → null
   const mult = { s: 1, m: 60, h: 3600 }[m[2]];
-  return n * mult;
+  const total = n * mult;
+  return Number.isSafeInteger(total) && total > 0 ? total : null;
 }
 
 // created + ttl_seconds as an ISO-8601-UTC string. With whole-second `created`
 // and integer `ttl_seconds`, epoch-ms equality with #1's derived value holds.
 function isoAddSeconds(created, ttl_seconds) {
-  return new Date(Date.parse(created) + ttl_seconds * 1000).toISOString();
+  // Total, never-throwing: an unparseable `created`, a non-safe `ttl_seconds`,
+  // or a sum beyond the Date range (±8.64e15 ms) yields "" so the record fails
+  // validateClaim's INVALID_ISO8601 check and the CLI rejects it predictably —
+  // rather than makeClaim throwing a RangeError from toISOString().
+  const base = Date.parse(created);
+  if (Number.isNaN(base) || !Number.isSafeInteger(ttl_seconds)) return "";
+  const ms = base + ttl_seconds * 1000;
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return "";
+  return new Date(ms).toISOString();
 }

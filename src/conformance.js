@@ -16,19 +16,19 @@ import { globsOverlap } from "./glob.js";
 import { isIso8601Utc } from "./schema.js";
 
 // Is claim `c` held/active at instant `at` (ISO string)? Temporal window
-// [created, expires): created ≤ at < expires. Malformed timestamps are treated
-// as "not held/active" (conservative — never invents coverage or a violation).
+// [created, expires): created ≤ at < expires. A release ENDS a claim, so if the
+// claim carries a valid `released_at`, it is only held for at < released_at —
+// otherwise a claim released before a later merge would falsely appear live.
+// Malformed timestamps are treated as "not held/active" (conservative — never
+// invents coverage or a violation).
 function within(c, at) {
   if (!isIso8601Utc(at) || !isIso8601Utc(c.created) || !isIso8601Utc(c.expires)) {
     return false;
   }
   const t = Date.parse(at);
-  return Date.parse(c.created) <= t && t < Date.parse(c.expires);
-}
-
-// Status fallback for coverage when a change has no `at`: any non-expired claim.
-function notExpired(c) {
-  return c.status !== "expired";
+  if (!(Date.parse(c.created) <= t && t < Date.parse(c.expires))) return false;
+  if (isIso8601Utc(c.released_at) && t >= Date.parse(c.released_at)) return false;
+  return true;
 }
 
 // conformance(claims, merges, opts) → { score, total, respected, violations, warnings }
@@ -59,7 +59,10 @@ export function conformance(claims, merges, opts = {}) {
   for (const { agent, file, at } of changes) {
     const matching = claims.filter((c) => c.globs.some((g) => globsOverlap(file, g)));
 
-    const held = (c) => (at != null ? within(c, at) : notExpired(c));
+    // Status fallback (no `at`): a claim covers only while it is "active". A
+    // "released" claim is no longer held, so it must not count as coverage —
+    // matching the collision-side `live` predicate below.
+    const held = (c) => (at != null ? within(c, at) : c.status === "active");
     const live = (c) => (at != null ? within(c, at) : c.status === "active");
 
     const covered = matching.some((c) => c.agent === agent && held(c));
