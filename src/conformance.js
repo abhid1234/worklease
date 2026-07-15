@@ -16,14 +16,20 @@ import { globsOverlap } from "./glob.js";
 import { isIso8601Utc } from "./schema.js";
 
 // Is claim `c` held/active at instant `at` (ISO string)? Temporal window
-// [created, expires): created ≤ at < expires. Malformed timestamps are treated
-// as "not held/active" (conservative — never invents coverage or a violation).
+// [created, expires): created ≤ at < expires. A release ends a claim, so when
+// `released_at` is a valid timestamp the window closes early: also require
+// at < released_at (half-open, matching `expires` — a change exactly at
+// `released_at` is not held). Malformed timestamps are treated as "not
+// held/active" (conservative — never invents coverage or a violation).
 function within(c, at) {
   if (!isIso8601Utc(at) || !isIso8601Utc(c.created) || !isIso8601Utc(c.expires)) {
     return false;
   }
   const t = Date.parse(at);
-  return Date.parse(c.created) <= t && t < Date.parse(c.expires);
+  if (Date.parse(c.created) > t || t >= Date.parse(c.expires)) {
+    return false;
+  }
+  return !isIso8601Utc(c.released_at) || t < Date.parse(c.released_at);
 }
 
 // Status fallback for coverage when a change has no `at`: any non-expired claim.

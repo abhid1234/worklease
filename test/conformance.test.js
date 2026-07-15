@@ -101,6 +101,37 @@ test("at-window boundaries: created is active, expires is not", () => {
   assert.equal(res.violations.length, 0);
 });
 
+test("temporal: a release ends the claim's window before expires", () => {
+  const RELEASED = "2026-01-01T00:45:00Z"; // created < released_at < expires
+  const AFTER_RELEASE = "2026-01-01T00:50:00Z"; // released_at < at < expires
+
+  // Own claim: at after released_at (but before expires) is no longer held.
+  const ownReleased = claim({ status: "released", released_at: RELEASED });
+  const ownMerge = [{ agent: "A", files: ["src/auth/login.ts"], at: AFTER_RELEASE }];
+  const ownRes = conformance([ownReleased], ownMerge);
+  assert.equal(ownRes.respected, 0); // no false coverage for the releaser
+  assert.equal(ownRes.warnings.length, 1);
+  assert.equal(ownRes.violations.length, 0);
+
+  // Other agent's released claim: no longer live, so no false violation.
+  const otherReleased = claim({ agent: "B", status: "released", released_at: RELEASED });
+  const otherRes = conformance([otherReleased], ownMerge);
+  assert.equal(otherRes.violations.length, 0); // no false violation
+  assert.equal(otherRes.warnings.length, 1);
+
+  // Before released_at the claim is still held (window is [created, released_at)).
+  const beforeRelease = [{ agent: "A", files: ["src/auth/login.ts"], at: INSIDE }];
+  assert.equal(conformance([ownReleased], beforeRelease).respected, 1);
+
+  // released_at boundary is half-open: at === released_at is not held.
+  const atBoundary = [{ agent: "A", files: ["src/auth/login.ts"], at: RELEASED }];
+  assert.equal(conformance([ownReleased], atBoundary).respected, 0);
+
+  // Malformed released_at is ignored: the [created, expires) window still applies.
+  const badRelease = claim({ status: "released", released_at: "not-a-date" });
+  assert.equal(conformance([badRelease], ownMerge).respected, 1);
+});
+
 test("status fallback (no at): coverage uses non-expired own claim", () => {
   const merges = [{ agent: "A", files: ["src/auth/login.ts"] }]; // no `at`
   assert.equal(conformance([claim({ status: "active" })], merges).respected, 1);
